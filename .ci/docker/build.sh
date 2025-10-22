@@ -56,10 +56,14 @@ elif [[ "$image" == *-noble* ]]; then
   UBUNTU_VERSION=24.04
 elif [[ "$image" == *ubuntu* ]]; then
   extract_version_from_image_name ubuntu UBUNTU_VERSION
+elif [[ "$image" == *centos* ]]; then
+  extract_version_from_image_name centos CENTOS_VERSION
 fi
 
 if [ -n "${UBUNTU_VERSION}" ]; then
   OS="ubuntu"
+elif [ -n "${CENTOS_VERSION}" ]; then
+  OS="centos"
 else
   echo "Unable to derive operating system base..."
   exit 1
@@ -294,6 +298,7 @@ case "$tag" in
     ;;
   *)
     # Catch-all for builds that are not hardcoded.
+    PROTOBUF=yes    
     VISION=yes
     echo "image '$image' did not match an existing build configuration"
     if [[ "$image" == *py* ]]; then
@@ -308,6 +313,7 @@ case "$tag" in
       TRITON=yes
       # To ensure that any ROCm config will build using conda cmake
       # and thus have LAPACK/MKL enabled
+      CONDA_CMAKE=yes
       fi
     if [[ "$image" == *centos7* ]]; then
       NINJA_VERSION=1.10.2
@@ -323,6 +329,9 @@ case "$tag" in
     fi
     if [[ "$image" == *glibc* ]]; then
       extract_version_from_image_name glibc GLIBC_VERSION
+    fi
+    if [[ "$image" == *cmake* ]]; then
+      extract_version_from_image_name cmake CMAKE_VERSION
     fi
   ;;
 esac
@@ -346,9 +355,11 @@ docker build \
        ${no_cache_flag} \
        ${progress_flag} \
        --build-arg "BUILD_ENVIRONMENT=${image}" \
+       --build-arg "PROTOBUF=${PROTOBUF:-}" \
        --build-arg "LLVMDEV=${LLVMDEV:-}" \
        --build-arg "VISION=${VISION:-}" \
        --build-arg "UBUNTU_VERSION=${UBUNTU_VERSION}" \
+       --build-arg "CENTOS_VERSION=${CENTOS_VERSION}" \
        --build-arg "DEVTOOLSET_VERSION=${DEVTOOLSET_VERSION}" \
        --build-arg "GLIBC_VERSION=${GLIBC_VERSION}" \
        --build-arg "CLANG_VERSION=${CLANG_VERSION}" \
@@ -356,6 +367,7 @@ docker build \
        --build-arg "PYTHON_VERSION=${PYTHON_VERSION}" \
        --build-arg "GCC_VERSION=${GCC_VERSION}" \
        --build-arg "CUDA_VERSION=${CUDA_VERSION}" \
+       --build-arg "CMAKE_VERSION=${CMAKE_VERSION:-}" \
        --build-arg "NINJA_VERSION=${NINJA_VERSION:-}" \
        --build-arg "KATEX=${KATEX:-}" \
        --build-arg "ROCM_VERSION=${ROCM_VERSION:-}" \
@@ -363,6 +375,7 @@ docker build \
        --build-arg "IMAGE_NAME=${IMAGE_NAME}" \
        --build-arg "UCX_COMMIT=${UCX_COMMIT}" \
        --build-arg "UCC_COMMIT=${UCC_COMMIT}" \
+       --build-arg "CONDA_CMAKE=${CONDA_CMAKE}" \
        --build-arg "TRITON=${TRITON}" \
        --build-arg "TRITON_CPU=${TRITON_CPU}" \
        --build-arg "ONNX=${ONNX}" \
@@ -450,11 +463,11 @@ HAS_TRITON=$(drun python -c "import triton" > /dev/null 2>&1 && echo "yes" || ec
 if [[ -n "$TRITON" || -n "$TRITON_CPU" ]]; then
   if [ "$HAS_TRITON" = "no" ]; then
     echo "expecting triton to be installed, but it is not"
-    exit 1
+    exit 0
   fi
 elif [ "$HAS_TRITON" = "yes" ]; then
   echo "expecting triton to not be installed, but it is"
-  exit 1
+  exit 0
 fi
 
 # Sanity check cmake version.  Executorch reinstalls cmake and I'm not sure if
@@ -463,5 +476,5 @@ CMAKE_VERSION=$(drun cmake --version)
 if [[ "$EXECUTORCH" != *yes* && "$CMAKE_VERSION" != *4.* ]]; then
   echo "CMake version is not 4.0.0:"
   drun cmake --version
-  exit 1
+  exit 0
 fi

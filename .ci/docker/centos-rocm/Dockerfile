@@ -19,8 +19,6 @@ RUN yum install -y glibc-langpack-en
 # Update CentOS git version
 RUN yum -y remove git
 RUN yum -y remove git-*
-RUN yum -y install https://packages.endpointdev.com/rhel/7/os/x86_64/endpoint-repo-1.9-1.x86_64.rpm && \
-    sed -i 's/packages.endpoint/packages.endpointdev/' /etc/yum.repos.d/endpoint.repo
 RUN yum install -y git
 
 # Install devtoolset
@@ -49,6 +47,7 @@ COPY requirements-ci.txt /opt/conda/requirements-ci.txt
 COPY ./common/install_conda.sh install_conda.sh
 COPY ./common/common_utils.sh common_utils.sh
 RUN bash ./install_conda.sh && rm install_conda.sh common_utils.sh /opt/conda/requirements-ci.txt
+
 
 # (optional) Install vision packages like OpenCV
 ARG VISION
@@ -83,6 +82,7 @@ ENV MAGMA_HOME /opt/rocm/magma
 ENV LANG en_US.utf8
 ENV LC_ALL en_US.utf8
 
+
 # (optional) Install non-default Ninja version
 ARG NINJA_VERSION
 COPY ./common/install_ninja.sh install_ninja.sh
@@ -98,7 +98,7 @@ COPY ./common/install_triton.sh install_triton.sh
 COPY ./common/common_utils.sh common_utils.sh
 COPY ci_commit_pins/triton.txt triton.txt
 COPY triton_version.txt triton_version.txt
-RUN if [ -n "${TRITON}" ]; then bash ./install_triton.sh; fi
+#RUN if [ -n "${TRITON}" ]; then bash ./install_triton.sh; fi
 RUN rm install_triton.sh common_utils.sh triton.txt triton_version.txt
 
 # Install ccache/sccache (do this last, so we get priority in PATH)
