@@ -40,7 +40,6 @@
 #include <thrust/iterator/discard_iterator.h>
 
 
-<<<<<<< HEAD
 #if defined(__CUDACC__) && ((CUSPARSE_VERSION >= 11000) || (defined(USE_ROCM) && ROCM_VERSION >= 60300))
 #define IS_CUSPARSE11_AVAILABLE() 1
 #else
@@ -60,9 +59,8 @@
 #endif
 
 #if IS_CUSPARSE11_AVAILABLE()
-=======
->>>>>>> upstream/main
 #include <library_types.h>
+#endif
 
 namespace at::native {
 
