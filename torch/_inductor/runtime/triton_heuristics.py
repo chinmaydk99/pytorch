@@ -2695,6 +2695,15 @@ def pointwise(
                             )
                         ]
                     )
+                # wri0 additional config
+                configs.append(
+                    triton_config_with_settings(
+                        size_hints,
+                        128,
+                        num_warps=1,
+                        num_stages=1,
+                    )  # wri0: 56 us: triton_poi_fused_cat_mul_sigmoid_view_51
+                )
     if len(size_hints) == 2:
         # Only avoiding tuning on TileHint.SQUARE if not on ROCm builds
         # ROCm has observed improvement by diverging here
@@ -2742,6 +2751,16 @@ def pointwise(
                         triton_config_with_settings(
                             size_hints, 32, 512
                         ),  # +30% for some kernels
+                    ]
+                )
+                # bypass triton_config_with_settings -> triton_config logic
+                if "x" in size_hints and "y" in size_hints:
+                    configs += [
+                        Config({"XBLOCK": 512, "YBLOCK": 8}, num_warps=8),  # wrt1/t21
+                        Config({"XBLOCK": 32, "YBLOCK": 128}, num_warps=4),  # wrt2: 570us
+                        Config({"XBLOCK": 64, "YBLOCK": 32}, num_warps=8),  # wrt3: 150us
+                        Config({"XBLOCK": 64, "YBLOCK": 256}, num_warps=4),  # wri0: 70us
+                        Config({"XBLOCK": 512, "YBLOCK": 64}, num_warps=8),  # wri0: 58us
                     ]
                 )
     if len(size_hints) == 3:
