@@ -28,6 +28,7 @@ from torch.testing._internal.common_utils import (
     MI350_ARCH
 )
 from torch.testing._internal.distributed._tensor.common_dtensor import (
+    create_local_tensor_test_class,
     DTensorTestBase,
     skip_unless_torch_gpu,
     with_comms,
@@ -616,6 +617,10 @@ class DistMatrixOpsTest(DTensorTestBase):
 
 
 instantiate_parametrized_tests(DistMatrixOpsTest)
+
+DistMatrixOpsTestWithLocalTensor = create_local_tensor_test_class(
+    DistMatrixOpsTest,
+)
 
 if __name__ == "__main__":
     run_tests()

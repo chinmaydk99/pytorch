@@ -12,10 +12,10 @@ from torch._inductor.utils import run_and_get_code
 from torch.testing import FileCheck
 from torch.testing._internal.common_utils import (
     instantiate_parametrized_tests,
-    patch_test_members,
     NAVI3_ARCH,
     is_arch,
     parametrize,
+    patch_test_members,
     TEST_XPU,
 )
 from torch.testing._internal.inductor_utils import GPU_TYPE, HAS_CUDA_AND_TRITON
@@ -74,7 +74,7 @@ class TestDecomposeAddMM(torch.nn.Module):
 )
 @instantiate_parametrized_tests
 class TestDecomposeMemMM(TestCase):
-    def __init__(self, method_name='runTest', methodName='runTest'):
+    def __init__(self, method_name="runTest", methodName="runTest"):
         super().__init__(method_name, methodName)
         self.atol = 1e-3
         self.rtol = 1e-3
@@ -83,7 +83,9 @@ class TestDecomposeMemMM(TestCase):
         if rtol is None:
             rtol = self.rtol
         if atol is None:
-            atol = self.rtol
+            atol = self.atol
+        self.rtol = rtol
+        self.atol = atol
 
     def compare_dict_tensors(self, ref_dict, res_dict, rtol=None, atol=None):
         self.setup_tolerance(rtol, atol)
@@ -92,7 +94,9 @@ class TestDecomposeMemMM(TestCase):
         for key1 in ref_dict.keys():
             key2 = "_orig_mod." + key1
             assert key2 in res_dict, f"{key1} does not exist in traced module"
-            if not torch.allclose(ref_dict[key1], res_dict[key2], rtol=self.rtol, atol=self.atol):
+            if not torch.allclose(
+                ref_dict[key1], res_dict[key2], rtol=self.rtol, atol=self.atol
+            ):
                 return False
         return True
 
@@ -106,14 +110,20 @@ class TestDecomposeMemMM(TestCase):
         self.setup_tolerance(rtol, atol)
         ref_params = dict(module.named_parameters())
         res_params = dict(traced.named_parameters())
-        self.assertTrue(self.compare_dict_tensors(ref_params, res_params, rtol=self.rtol, atol=self.atol))
+        self.assertTrue(
+            self.compare_dict_tensors(
+                ref_params, res_params, rtol=self.rtol, atol=self.atol
+            )
+        )
 
     def compare_gradients(self, module, traced, rtol=None, atol=None):
         self.setup_tolerance(rtol, atol)
         ref_grad = {key: param.grad for key, param in module.named_parameters()}
         res_grad = {key: param.grad for key, param in traced.named_parameters()}
         self.assertTrue(
-            self.compare_dict_tensors(ref_grad, res_grad, rtol=self.rtol, atol=self.atol)
+            self.compare_dict_tensors(
+                ref_grad, res_grad, rtol=self.rtol, atol=self.atol
+            )
         )
 
     @parametrize(
