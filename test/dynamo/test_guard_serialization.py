@@ -1246,7 +1246,7 @@ class TestGuardSerialization(TestGuardSerializationBase):
         try:
             x = torch.randn(3, 2)
             torch.use_deterministic_algorithms(True)
-            ref, loaded = self._test_serialization("DETERMINISTIC_ALGORITHMS", fn, x)
+            ref, loaded = self._test_serialization("GLOBAL_STATE", fn, x)
             torch.use_deterministic_algorithms(False)
             self._test_check_fn(ref, loaded, {"x": x}, False)
             torch.use_deterministic_algorithms(True)
@@ -1689,6 +1689,38 @@ class TestGuardSerialization(TestGuardSerializationBase):
         self._test_check_fn(
             ref, loaded, {"x": x, "d": ModWithDict({"b": 1e-9, "a": 1e9})}, False
         )
+
+    def test_global_state_guard_filter(self):
+        def foo(x):
+            return x + 1
+
+        x = torch.randn(3, 2)
+
+        with torch.no_grad():
+            compiled_fn = torch.compile(
+                foo, options={"guard_filter_fn": torch.compiler.skip_all_guards_unsafe}
+            )
+            compiled_fn(x)
+
+        # Check global guards are gone.
+        with torch.enable_grad(), torch.compiler.set_stance("fail_on_recompile"):
+            self.assertEqual(compiled_fn(x), foo(x))
+
+    def test_torch_function_state_filter(self):
+        def foo(x):
+            return x + 1
+
+        x = torch.randn(3, 2)
+
+        with GlobalTorchFunctionMode():
+            compiled_fn = torch.compile(
+                foo, options={"guard_filter_fn": torch.compiler.skip_all_guards_unsafe}
+            )
+            compiled_fn(x)
+
+        # Check global guards are gone.
+        with torch.compiler.set_stance("fail_on_recompile"):
+            self.assertEqual(compiled_fn(x), foo(x))
 
 
 class SimpleModule(torch.nn.Module):
