@@ -1,7 +1,31 @@
-name: Scan for @skipIfRocm and Create Issues
+name: Crowdsource Skipped Tests
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'True to print logs without creating issues'
+        required: true
+        default: 'false'
+        type: boolean
+
+permissions:
+  contents: read
+  issues: write
+  repository-projects: write
+
+jobs:
+  scan-and-create-issues:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Scan for @skipIfRocm and Create Issues
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PROJECT_NAME: "IFU_Automatic_Issues_Test" 
+          # IMPORTANT: If "Project not found" error occurs, comment out the PROJECT_NAME line below
+          PROJECT_NAME: "IFU_Automatic_Issues_Test"
           ASSIGNEE: "vivianlee-amd"
           DRY_RUN: ${{ inputs.dry_run }}
         shell: bash
@@ -14,6 +38,7 @@ name: Scan for @skipIfRocm and Create Issues
           grep -rn "@skipIfRocm" test/ --include="*.py" | while IFS=: read -r filepath line_number line_content; do
             
             # --- 1. Extract Test Name ---
+            # Uses awk to find the first 'def' or 'class' definition after the decorator
             test_name=$(awk -v start="$line_number" 'NR >= start && /^[[:space:]]*(def|class)[[:space:]]+/ {print $2; exit}' "$filepath" | sed 's/[(:].*//')
             
             if [[ -z "$test_name" ]]; then
@@ -44,8 +69,8 @@ name: Scan for @skipIfRocm and Create Issues
               continue
             fi
 
-            # --- 4. Construct Issue Body (FIXED) ---
-            # We use a grouped echo block redirected to file to avoid Indentation/Heredoc errors
+            # --- 4. Construct Issue Body ---
+            # Using grouped echo to safely write to file (Fixes YAML indentation errors)
             {
               echo "### Skipped ROCm Test: \`${test_name}\`"
               echo ""
