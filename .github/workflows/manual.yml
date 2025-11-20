@@ -24,9 +24,8 @@ jobs:
       - name: Scan for @skipIfRocm and Create Issues
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # IMPORTANT: If "Project not found" error occurs, comment out the PROJECT_NAME line below
+          # NOTE: Make sure this project exists on your fork, or comment this line out
           PROJECT_NAME: "IFU_Automatic_Issues_Test"
-          ASSIGNEE: "vivianlee-amd"
           DRY_RUN: ${{ inputs.dry_run }}
         shell: bash
         run: |
@@ -38,7 +37,6 @@ jobs:
           grep -rn "@skipIfRocm" test/ --include="*.py" | while IFS=: read -r filepath line_number line_content; do
             
             # --- 1. Extract Test Name ---
-            # Uses awk to find the first 'def' or 'class' definition after the decorator
             test_name=$(awk -v start="$line_number" 'NR >= start && /^[[:space:]]*(def|class)[[:space:]]+/ {print $2; exit}' "$filepath" | sed 's/[(:].*//')
             
             if [[ -z "$test_name" ]]; then
@@ -70,7 +68,6 @@ jobs:
             fi
 
             # --- 4. Construct Issue Body ---
-            # Using grouped echo to safely write to file (Fixes YAML indentation errors)
             {
               echo "### Skipped ROCm Test: \`${test_name}\`"
               echo ""
@@ -90,14 +87,14 @@ jobs:
             if [[ "$DRY_RUN" == "true" ]]; then
               echo "  [DRY RUN] Would create issue for $test_name"
             else
+              # REMOVED: --assignee flag
               gh issue create \
                 --repo "${{ github.repository }}" \
                 --title "[ROCm Skip] ${test_name}" \
                 --body-file /tmp/issue_body.txt \
                 --label "rocm-skipped" \
-                --assignee "$ASSIGNEE" \
                 --project "$PROJECT_NAME" \
-                || echo "  ❌ Error creating issue (Project/Assignee permissions?)"
+                || echo "  ❌ Error creating issue (Check Project permissions)"
               
               echo "  ✓ Issue created."
               sleep 2
