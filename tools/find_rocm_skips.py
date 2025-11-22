@@ -20,6 +20,7 @@ import textwrap
 import urllib.error
 import urllib.parse
 import urllib.request
+import http.client
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
@@ -876,9 +877,10 @@ class GitHubAPIError(RuntimeError):
 
 
 class GitHubClient:
-    def __init__(self, token: str, dry_run: bool = False) -> None:
+    def __init__(self, token: str, dry_run: bool = False, verbose: bool = False) -> None:
         self.token = token
         self.dry_run = dry_run
+        self.verbose = verbose
         self.api_base = "https://api.github.com"
         self.graphql_url = f"{self.api_base}/graphql"
 
@@ -899,7 +901,17 @@ class GitHubClient:
                 req.add_header(key, value)
         try:
             with urllib.request.urlopen(req) as response:
-                payload = response.read()
+                if self.verbose:
+                    print(f"[verbose] {method} {url}")
+                try:
+                    payload = response.read()
+                except http.client.IncompleteRead as err:
+                    if self.verbose:
+                        print(
+                            "[verbose] Received incomplete read from GitHub; "
+                            "continuing with partial payload."
+                        )
+                    payload = err.partial
                 headers = {k: v for k, v in response.getheaders()}
                 return payload, headers
         except urllib.error.HTTPError as error:
@@ -955,16 +967,105 @@ class GitHubClient:
         self, owner: str, repo: str, state: str = "all"
     ) -> Iterator[Dict[str, Any]]:
         params = {"state": state, "per_page": 100}
+        page = 1
         data, headers = self._rest("GET", f"/repos/{owner}/{repo}/issues", params=params)
         while True:
             if isinstance(data, list):
+                if self.verbose:
+                    print(
+                        f"[verbose] Retrieved {len(data)} issue(s) from page {page} "
+                        f"of {owner}/{repo}."
+                    )
                 for issue in data:
                     if isinstance(issue, dict) and "pull_request" not in issue:
                         yield issue
             next_link = self._extract_next_link(headers)
             if not next_link:
                 break
+            page += 1
             data, headers = self._rest_full_url("GET", next_link)
+
+    def list_project_issues(
+        self,
+        project_id: str,
+        repo_full_name: str,
+        page_size: int = 50,
+    ) -> Iterator[Dict[str, Any]]:
+        query = """
+            query($projectId: ID!, $pageSize: Int!, $cursor: String) {
+              node(id: $projectId) {
+                ... on ProjectV2 {
+                  items(first: $pageSize, after: $cursor) {
+                    pageInfo {
+                      hasNextPage
+                      endCursor
+                    }
+                    nodes {
+                      content {
+                        __typename
+                        ... on Issue {
+                          id
+                          databaseId
+                          number
+                          title
+                          body
+                          url
+                          repository {
+                            nameWithOwner
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+        """
+        cursor: Optional[str] = None
+        page = 1
+        while True:
+            variables = {
+                "projectId": project_id,
+                "pageSize": page_size,
+                "cursor": cursor,
+            }
+            data = self.graphql(query, variables)
+            node = data.get("node") if isinstance(data, dict) else None
+            project = node if isinstance(node, dict) else None
+            items = project.get("items") if project else None
+            if not items:
+                break
+            nodes = items.get("nodes") or []
+            if self.verbose:
+                print(
+                    f"[verbose] Retrieved {len(nodes)} project item(s) from page {page}."
+                )
+            for item in nodes:
+                content = item.get("content") if isinstance(item, dict) else None
+                if not isinstance(content, dict):
+                    continue
+                if content.get("__typename") != "Issue":
+                    continue
+                repo_info = content.get("repository")
+                if (
+                    isinstance(repo_info, dict)
+                    and repo_info.get("nameWithOwner") != repo_full_name
+                ):
+                    continue
+                issue = {
+                    "number": content.get("number"),
+                    "body": content.get("body"),
+                    "node_id": content.get("id"),
+                    "id": content.get("databaseId"),
+                    "title": content.get("title"),
+                    "url": content.get("url"),
+                }
+                yield issue
+            page_info = items.get("pageInfo") if isinstance(items, dict) else None
+            if not page_info or not page_info.get("hasNextPage"):
+                break
+            cursor = page_info.get("endCursor")
+            page += 1
 
     def create_issue(
         self,
@@ -1108,9 +1209,18 @@ def collect_existing_issue_markers(
     client: GitHubClient,
     owner: str,
     repo: str,
+    *,
+    project_id: Optional[str] = None,
 ) -> Dict[str, Dict[str, Any]]:
     markers: Dict[str, Dict[str, Any]] = {}
-    for issue in client.list_repo_issues(owner, repo, state="all"):
+    repo_full_name = f"{owner}/{repo}"
+    if project_id:
+        iterator: Iterable[Dict[str, Any]] = client.list_project_issues(
+            project_id, repo_full_name
+        )
+    else:
+        iterator = client.list_repo_issues(owner, repo, state="all")
+    for issue in iterator:
         marker = extract_issue_marker(issue.get("body"))
         if marker and marker not in markers:
             markers[marker] = issue
@@ -1225,6 +1335,11 @@ def parse_args() -> argparse.Namespace:
         help="Preview issue creation without making API mutations.",
     )
     parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Print detailed progress information while running.",
+    )
+    parser.add_argument(
         "--max-issues",
         type=int,
         help="Process at most this many issue candidates (useful for testing).",
@@ -1286,10 +1401,8 @@ def main() -> None:
         project_id: Optional[str] = None
 
         if token:
-            client = GitHubClient(token=token, dry_run=args.dry_run)
-            existing_markers = collect_existing_issue_markers(client, owner, repo)
-            print(
-                f"Found {len(existing_markers)} existing ROCm skip issue markers in {owner}/{repo}."
+            client = GitHubClient(
+                token=token, dry_run=args.dry_run, verbose=args.verbose
             )
 
             if args.project_owner and args.project_number is not None:
@@ -1301,6 +1414,22 @@ def main() -> None:
                 print(
                     f"Resolved project ID {project_id} for {args.project_owner} project #{args.project_number}."
                 )
+
+            if args.verbose:
+                scope = (
+                    f"project {project_id}"
+                    if project_id
+                    else f"repository {owner}/{repo}"
+                )
+                print(f"[verbose] Collecting existing issue markers from {scope}.")
+
+            existing_markers = collect_existing_issue_markers(
+                client, owner, repo, project_id=project_id
+            )
+            print(
+                f"Found {len(existing_markers)} existing ROCm skip issue markers in "
+                f"{owner}/{repo}{' within project scope' if project_id else ''}."
+            )
         else:
             print(
                 "[dry-run] PROJECT_ACCESS_TOKEN not set; skipping GitHub API calls and duplicate detection."
