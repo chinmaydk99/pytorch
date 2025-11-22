@@ -20,6 +20,7 @@ import textwrap
 import urllib.error
 import urllib.parse
 import urllib.request
+import http.client
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
@@ -38,6 +39,7 @@ ROCM_CONDITION_NAMES = (
 
 ISSUE_MARKER_PREFIX = "ROCM-SKIP"
 ISSUE_MARKER_RE = re.compile(r"<!--\s*ROCM-SKIP:([^>]+)\s*-->")
+ROCM_SKIP_COUNT_LINE_RE = re.compile(r"^-\s*ROCm-skipped tests:\s*\d+\s*$", re.MULTILINE)
 
 ROCM_SKIP_DECORATOR_SUFFIXES = {
     "skipifrocm",
@@ -586,7 +588,13 @@ def _relative_repo_path(path_str: str, repo_root: Path) -> str:
         rel = path.resolve().relative_to(repo_root)
         return rel.as_posix()
     except Exception:
-        return path.as_posix()
+        normalized = path.as_posix()
+        # If --test-root is absolute (possibly from another checkout), keep paths
+        # stable for issue markers by trimming to the test subtree when possible.
+        match = re.search(r"(?:^|/)test/.*", normalized)
+        if match:
+            return match.group(0).lstrip("/")
+        return normalized
 
 
 def _compact_detail(detail: Optional[str], width: int = 160) -> Optional[str]:
@@ -717,6 +725,62 @@ def build_issue_spec(
     )
 
 
+def update_parent_skip_count_line(
+    body: Optional[str],
+    skip_count: int,
+) -> Tuple[str, bool]:
+    desired_line = f"- ROCm-skipped tests: {skip_count}"
+
+    if body is None:
+        return f"## Context\n{desired_line}\n", True
+
+    line_ending = "\r\n" if "\r\n" in body else "\n"
+    normalized = body.replace("\r\n", "\n")
+
+    match = ROCM_SKIP_COUNT_LINE_RE.search(normalized)
+    if match:
+        current_line = match.group(0)
+        if current_line == desired_line:
+            return body, False
+        updated = normalized[: match.start()] + desired_line + normalized[match.end() :]
+        if not updated.endswith("\n"):
+            updated += "\n"
+        if line_ending == "\r\n":
+            updated = updated.replace("\n", "\r\n")
+        return updated, True
+
+    lines = normalized.split("\n")
+    if lines and lines[-1] == "":
+        lines = lines[:-1]
+
+    context_header_index: Optional[int] = None
+    for idx, line in enumerate(lines):
+        if line.strip() == "## Context":
+            context_header_index = idx
+            break
+
+    if context_header_index is not None:
+        section_end = len(lines)
+        for idx in range(context_header_index + 1, len(lines)):
+            if lines[idx].startswith("## "):
+                section_end = idx
+                break
+        insert_at = section_end
+        while insert_at > context_header_index + 1 and lines[insert_at - 1].strip() == "":
+            insert_at -= 1
+        lines.insert(insert_at, desired_line)
+    else:
+        if lines and lines[-1].strip():
+            lines.append("")
+        lines.append("## Context")
+        lines.append(desired_line)
+
+    updated = "\n".join(lines).rstrip("\n") + "\n"
+    if line_ending == "\r\n":
+        updated = updated.replace("\n", "\r\n")
+    return updated, True
+
+
 def build_sub_issue_body(
     parent_spec: IssueSpec,
     test: TestResult,
@@ -755,7 +819,7 @@ def create_sub_issues_for_parent(
     project_id: Optional[str],
 ) -> None:
     parent_number = parent_issue.get("number")
-    if parent_number is None:
+    if parent_number is None and not client.dry_run:
         print("Unable to determine parent issue number; skipping sub-issue creation.")
         return
 
@@ -778,28 +842,6 @@ def create_sub_issues_for_parent(
                 f"Sub-issue already exists for {key} "
                 f"(#{child_number if child_number is not None else 'unknown'}); skipping creation."
             )
-            expected_title = (
-                f"Test: {parent_spec.class_name}.{test.name}"
-                if parent_spec.class_name
-                else f"Test: {test.name}"
-            )
-            expected_body = build_sub_issue_body(
-                parent_spec,
-                test,
-                issue_repo,
-                parent_number,
-            )
-            try:
-                if child_number is not None:
-                    client.update_issue(
-                        owner,
-                        repo,
-                        child_number,
-                        title=expected_title,
-                        body=expected_body,
-                    )
-            except GitHubAPIError as exc:
-                print(f"    Failed to update sub-issue #{child_number}: {exc}")
 
         else:
             title = (
@@ -876,9 +918,10 @@ class GitHubAPIError(RuntimeError):
 
 
 class GitHubClient:
-    def __init__(self, token: str, dry_run: bool = False) -> None:
+    def __init__(self, token: str, dry_run: bool = False, verbose: bool = False) -> None:
         self.token = token
         self.dry_run = dry_run
+        self.verbose = verbose
         self.api_base = "https://api.github.com"
         self.graphql_url = f"{self.api_base}/graphql"
 
@@ -899,7 +942,17 @@ class GitHubClient:
                 req.add_header(key, value)
         try:
             with urllib.request.urlopen(req) as response:
-                payload = response.read()
+                if self.verbose:
+                    print(f"[verbose] {method} {url}")
+                try:
+                    payload = response.read()
+                except http.client.IncompleteRead as err:
+                    if self.verbose:
+                        print(
+                            "[verbose] Received incomplete read from GitHub; "
+                            "continuing with partial payload."
+                        )
+                    payload = err.partial
                 headers = {k: v for k, v in response.getheaders()}
                 return payload, headers
         except urllib.error.HTTPError as error:
@@ -955,16 +1008,105 @@ class GitHubClient:
         self, owner: str, repo: str, state: str = "all"
     ) -> Iterator[Dict[str, Any]]:
         params = {"state": state, "per_page": 100}
+        page = 1
         data, headers = self._rest("GET", f"/repos/{owner}/{repo}/issues", params=params)
         while True:
             if isinstance(data, list):
+                if self.verbose:
+                    print(
+                        f"[verbose] Retrieved {len(data)} issue(s) from page {page} "
+                        f"of {owner}/{repo}."
+                    )
                 for issue in data:
                     if isinstance(issue, dict) and "pull_request" not in issue:
                         yield issue
             next_link = self._extract_next_link(headers)
             if not next_link:
                 break
+            page += 1
             data, headers = self._rest_full_url("GET", next_link)
+
+    def list_project_issues(
+        self,
+        project_id: str,
+        repo_full_name: str,
+        page_size: int = 50,
+    ) -> Iterator[Dict[str, Any]]:
+        query = """
+            query($projectId: ID!, $pageSize: Int!, $cursor: String) {
+              node(id: $projectId) {
+                ... on ProjectV2 {
+                  items(first: $pageSize, after: $cursor) {
+                    pageInfo {
+                      hasNextPage
+                      endCursor
+                    }
+                    nodes {
+                      content {
+                        __typename
+                        ... on Issue {
+                          id
+                          databaseId
+                          number
+                          title
+                          body
+                          url
+                          repository {
+                            nameWithOwner
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+        """
+        cursor: Optional[str] = None
+        page = 1
+        while True:
+            variables = {
+                "projectId": project_id,
+                "pageSize": page_size,
+                "cursor": cursor,
+            }
+            data = self.graphql(query, variables)
+            node = data.get("node") if isinstance(data, dict) else None
+            project = node if isinstance(node, dict) else None
+            items = project.get("items") if project else None
+            if not items:
+                break
+            nodes = items.get("nodes") or []
+            if self.verbose:
+                print(
+                    f"[verbose] Retrieved {len(nodes)} project item(s) from page {page}."
+                )
+            for item in nodes:
+                content = item.get("content") if isinstance(item, dict) else None
+                if not isinstance(content, dict):
+                    continue
+                if content.get("__typename") != "Issue":
+                    continue
+                repo_info = content.get("repository")
+                if (
+                    isinstance(repo_info, dict)
+                    and repo_info.get("nameWithOwner") != repo_full_name
+                ):
+                    continue
+                issue = {
+                    "number": content.get("number"),
+                    "body": content.get("body"),
+                    "node_id": content.get("id"),
+                    "id": content.get("databaseId"),
+                    "title": content.get("title"),
+                    "url": content.get("url"),
+                }
+                yield issue
+            page_info = items.get("pageInfo") if isinstance(items, dict) else None
+            if not page_info or not page_info.get("hasNextPage"):
+                break
+            cursor = page_info.get("endCursor")
+            page += 1
 
     def create_issue(
         self,
@@ -1108,9 +1250,18 @@ def collect_existing_issue_markers(
     client: GitHubClient,
     owner: str,
     repo: str,
+    *,
+    project_id: Optional[str] = None,
 ) -> Dict[str, Dict[str, Any]]:
     markers: Dict[str, Dict[str, Any]] = {}
-    for issue in client.list_repo_issues(owner, repo, state="all"):
+    repo_full_name = f"{owner}/{repo}"
+    if project_id:
+        iterator: Iterable[Dict[str, Any]] = client.list_project_issues(
+            project_id, repo_full_name
+        )
+    else:
+        iterator = client.list_repo_issues(owner, repo, state="all")
+    for issue in iterator:
         marker = extract_issue_marker(issue.get("body"))
         if marker and marker not in markers:
             markers[marker] = issue
@@ -1125,7 +1276,9 @@ def make_output_payload(
     total_tests, category_counter = build_stats(results)
 
     payload = {
-        "generated_at": datetime.datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        "generated_at": datetime.datetime.now(datetime.timezone.utc)
+        .isoformat(timespec="seconds")
+        .replace("+00:00", "Z"),
         "search_root": str(search_root),
         "include_third_party": include_third_party,
         "total_tests": total_tests,
@@ -1225,6 +1378,11 @@ def parse_args() -> argparse.Namespace:
         help="Preview issue creation without making API mutations.",
     )
     parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Print detailed progress information while running.",
+    )
+    parser.add_argument(
         "--max-issues",
         type=int,
         help="Process at most this many issue candidates (useful for testing).",
@@ -1286,10 +1444,8 @@ def main() -> None:
         project_id: Optional[str] = None
 
         if token:
-            client = GitHubClient(token=token, dry_run=args.dry_run)
-            existing_markers = collect_existing_issue_markers(client, owner, repo)
-            print(
-                f"Found {len(existing_markers)} existing ROCm skip issue markers in {owner}/{repo}."
+            client = GitHubClient(
+                token=token, dry_run=args.dry_run, verbose=args.verbose
             )
 
             if args.project_owner and args.project_number is not None:
@@ -1301,6 +1457,22 @@ def main() -> None:
                 print(
                     f"Resolved project ID {project_id} for {args.project_owner} project #{args.project_number}."
                 )
+
+            if args.verbose:
+                scope = (
+                    f"project {project_id}"
+                    if project_id
+                    else f"repository {owner}/{repo}"
+                )
+                print(f"[verbose] Collecting existing issue markers from {scope}.")
+
+            existing_markers = collect_existing_issue_markers(
+                client, owner, repo, project_id=project_id
+            )
+            print(
+                f"Found {len(existing_markers)} existing ROCm skip issue markers in "
+                f"{owner}/{repo}{' within project scope' if project_id else ''}."
+            )
         else:
             print(
                 "[dry-run] PROJECT_ACCESS_TOKEN not set; skipping GitHub API calls and duplicate detection."
@@ -1329,32 +1501,40 @@ def main() -> None:
                     f"Skipping existing issue for {spec.key} "
                     f"(#{issue_number if issue_number is not None else 'unknown'})"
                 )
-                try:
-                    if issue_number is not None:
-                        client.update_issue(
-                            owner,
-                            repo,
-                            issue_number,
-                            title=spec.title,
-                            body=spec.body,
-                        )
-                except GitHubAPIError as exc:
-                    print(f"  Failed to update existing issue: {exc}")
-                    existing_issue = None
-                else:
-                    create_sub_issues_for_parent(
-                        client,
-                        owner,
-                        repo,
-                        existing_issue,
-                        spec,
-                        args.issue_repo,
-                        args.issue_labels,
-                        args.issue_assignees,
-                        existing_markers,
-                        project_id,
-                    )
-                    continue
+                updated_body, body_changed = update_parent_skip_count_line(
+                    existing_issue.get("body"),
+                    len(spec.tests),
+                )
+                if body_changed:
+                    if issue_number is None:
+                        print("  Unable to update parent issue count line (missing issue number).")
+                    else:
+                        try:
+                            client.update_issue(
+                                owner,
+                                repo,
+                                issue_number,
+                                body=updated_body,
+                            )
+                            existing_issue["body"] = updated_body
+                            print(
+                                f"  Updated parent issue #{issue_number} ROCm-skipped tests count to {len(spec.tests)}."
+                            )
+                        except GitHubAPIError as exc:
+                            print(f"  Failed to update parent issue count line: {exc}")
+                create_sub_issues_for_parent(
+                    client,
+                    owner,
+                    repo,
+                    existing_issue,
+                    spec,
+                    args.issue_repo,
+                    args.issue_labels,
+                    args.issue_assignees,
+                    existing_markers,
+                    project_id,
+                )
+                continue
 
             planned += 1
             print(f"Preparing issue for {spec.key}")
@@ -1386,6 +1566,20 @@ def main() -> None:
                     existing_markers,
                     project_id,
                 )
+            elif args.dry_run:
+                stub = {"number": None, "node_id": None, "id": None}
+                create_sub_issues_for_parent(
+                    client,
+                    owner,
+                    repo,
+                    stub,
+                    spec,
+                    args.issue_repo,
+                    args.issue_labels,
+                    args.issue_assignees,
+                    existing_markers,
+                    project_id,
+                )
 
         if args.dry_run:
             print(
@@ -1399,5 +1593,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-
