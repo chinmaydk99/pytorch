@@ -1,0 +1,30 @@
+name: List IFU tags
+
+on:
+  workflow_dispatch:
+
+jobs:
+  list-tags:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch tags
+        run: git fetch origin --tags --force
+
+      - name: List IFU tags
+        run: |
+          echo "Available IFU tags:"
+          echo ""
+          echo "=== develop branch ==="
+          git tag -l "develop_IFU_*" | sort
+          echo ""
+          echo "=== rocm7.1_internal_testing branch ==="
+          git tag -l "rocm7.1_internal_testing_IFU_*" | sort
+          echo ""
+          echo "=== Other IFU tags ==="
+          git tag -l "*IFU*" | grep -v "develop_IFU" | grep -v "rocm7.1_internal_testing_IFU" | sort
