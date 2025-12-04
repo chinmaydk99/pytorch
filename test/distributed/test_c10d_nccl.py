@@ -4316,7 +4316,7 @@ class CommTest(test_c10d_common.AbstractCommTest, MultiProcessTestCase):
             if not torch._C._cuda_canDeviceAccessPeer(self.rank, peer):
                 raise SkipTest("Test requires p2p access")
 
-        if not SM80OrLater:
+        if not torch.version.hip and not SM80OrLater:
             raise SkipTest("Test requires sm>=80")
 
         store = c10d.FileStore(self.file_name, self.world_size)
