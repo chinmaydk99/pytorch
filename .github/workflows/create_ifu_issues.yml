@@ -1,0 +1,31 @@
+name: Create issues for ROCm commits
+
+on:
+  workflow_dispatch:
+    inputs:
+      prev_post_tag:
+        description: "Previous IFU post tag"
+        required: true
+        type: string
+      curr_pre_tag:
+        description: "Current IFU pre tag"
+        required: true
+        type: string
+
+jobs:
+  create-issues:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch tags
+        run: git fetch origin --tags --force
+
+      - name: List commits in range
+        run: |
+          echo "Commits between ${{ inputs.prev_post_tag }} and ${{ inputs.curr_pre_tag }}:"
+          git log ${{ inputs.prev_post_tag }}..${{ inputs.curr_pre_tag }} --oneline --no-merges
