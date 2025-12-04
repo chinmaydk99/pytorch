@@ -11,10 +11,31 @@ on:
         description: "Current IFU pre tag"
         required: true
         type: string
+      target_repo:
+        description: "Target repo for issue creation"
+        required: false
+        default: "chinmaydk99/pytorch"
+        type: string
+      project_number:
+        description: "GitHub Project number"
+        required: false
+        default: "7"
+        type: string
+      project_owner:
+        description: "Project owner"
+        required: false
+        default: "chinmaydk99"
+        type: string
+
+permissions:
+  contents: read
+  issues: write
 
 jobs:
   create-issues:
     runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.IFU_GITHUB_TOKEN }}
 
     steps:
       - name: Checkout repository
@@ -29,3 +50,47 @@ jobs:
         run: |
           echo "Commits between ${{ inputs.prev_post_tag }} and ${{ inputs.curr_pre_tag }}:"
           git log ${{ inputs.prev_post_tag }}..${{ inputs.curr_pre_tag }} --oneline --no-merges
+
+      - name: Create issues
+        env:
+          PREV_POST_TAG: ${{ inputs.prev_post_tag }}
+          CURR_PRE_TAG: ${{ inputs.curr_pre_tag }}
+          TARGET_REPO: ${{ inputs.target_repo }}
+          PROJECT_NUMBER: ${{ inputs.project_number }}
+          PROJECT_OWNER: ${{ inputs.project_owner }}
+        run: |
+          echo "Creating issues in ${TARGET_REPO}..."
+          
+          git log "${PREV_POST_TAG}..${CURR_PRE_TAG}" --format="%H" --no-merges | while read hash; do
+            short_hash="${hash:0:7}"
+            subject=$(git log -1 --format="%s" "$hash")
+            author=$(git log -1 --format="%an" "$hash")
+            email=$(git log -1 --format="%ae" "$hash")
+            
+            echo "Processing ${short_hash}: ${subject}"
+            
+            # Create issue body
+            body="**Commit:** ${hash}
+          **Author:** ${author} (${email})
+          **Link:** https://github.com/${{ github.repository }}/commit/${hash}
+          
+          This commit was made between IFU merges."
+            
+            # Create the issue
+            issue_url=$(gh issue create \
+              --repo "${TARGET_REPO}" \
+              --title "[ROCm Commit] ${short_hash}: ${subject:0:60}" \
+              --body "${body}")
+            
+            echo "Created: ${issue_url}"
+            
+            # Add to project
+            if [[ -n "${PROJECT_NUMBER}" ]]; then
+              echo "Adding to project ${PROJECT_OWNER}/${PROJECT_NUMBER}..."
+              gh project item-add "${PROJECT_NUMBER}" --owner "${PROJECT_OWNER}" --url "${issue_url}" || echo "Warning: Failed to add to project"
+            fi
+            
+            sleep 1
+          done
+          
+          echo "Done!"
