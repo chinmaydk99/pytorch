@@ -58,6 +58,7 @@ jobs:
           TARGET_REPO: ${{ inputs.target_repo }}
           PROJECT_NUMBER: ${{ inputs.project_number }}
           PROJECT_OWNER: ${{ inputs.project_owner }}
+          REPO_NAME: ${{ github.repository }}
         run: |
           echo "Creating issues in ${TARGET_REPO}..."
           
@@ -69,25 +70,45 @@ jobs:
             
             echo "Processing ${short_hash}: ${subject}"
             
-            # Create issue body
-            body="**Commit:** ${hash}
-          **Author:** ${author} (${email})
-          **Link:** https://github.com/${{ github.repository }}/commit/${hash}
-          
-          This commit was made between IFU merges."
+            # Extract GitHub username from noreply email
+            gh_username=""
+            if [[ "$email" =~ ^[0-9]+\+([^@]+)@users\.noreply\.github\.com$ ]]; then
+              gh_username="${BASH_REMATCH[1]}"
+              echo "  Detected GitHub username: ${gh_username}"
+            fi
+            
+            # Write issue body to file
+            cat > /tmp/issue_body.md << EOF
+          **Commit:** $hash
+          **Author:** $author ($email)
+          **Link:** [$short_hash](https://github.com/${REPO_NAME}/commit/${hash})
+
+          This commit was made between IFU merges.
+          EOF
             
             # Create the issue
             issue_url=$(gh issue create \
               --repo "${TARGET_REPO}" \
               --title "[ROCm Commit] ${short_hash}: ${subject:0:60}" \
-              --body "${body}")
+              --body-file /tmp/issue_body.md)
             
-            echo "Created: ${issue_url}"
+            echo "  Created: ${issue_url}"
+            
+            # Try to assign if we have a username
+            if [[ -n "${gh_username}" ]]; then
+              echo "  Trying to assign to @${gh_username}..."
+              if gh issue edit "${issue_url}" --add-assignee "${gh_username}" 2>/dev/null; then
+                echo "  ✓ Assigned"
+              else
+                echo "  ✗ Could not assign, adding comment instead..."
+                gh issue comment "${issue_url}" --body "cc @${gh_username} - you authored this commit" || true
+              fi
+            fi
             
             # Add to project
             if [[ -n "${PROJECT_NUMBER}" ]]; then
-              echo "Adding to project ${PROJECT_OWNER}/${PROJECT_NUMBER}..."
-              gh project item-add "${PROJECT_NUMBER}" --owner "${PROJECT_OWNER}" --url "${issue_url}" || echo "Warning: Failed to add to project"
+              echo "  Adding to project..."
+              gh project item-add "${PROJECT_NUMBER}" --owner "${PROJECT_OWNER}" --url "${issue_url}" || echo "  Warning: Failed to add to project"
             fi
             
             sleep 1
