@@ -94,10 +94,13 @@ jobs:
               echo "  Found GitHub username via API: ${gh_username}"
             fi
             
-            body="**Commit:** \`${hash}\`
+            body=$(cat <<EOF
+**Commit:** ${hash}
 **Author:** ${author} (${email})
-**Branch:** \`${BRANCH}\`
-**Link:** [View commit](https://github.com/${REPO_NAME}/commit/${hash})"
+**Branch:** ${BRANCH}
+**Link:** [View commit](https://github.com/${REPO_NAME}/commit/${hash})
+EOF
+)
             
             issue_url=$(gh issue create \
               --repo "${TARGET_REPO}" \
