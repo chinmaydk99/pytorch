@@ -46,61 +46,21 @@ jobs:
       - name: Fetch tags
         run: git fetch origin --tags --force
 
-      - name: Extract branch and date from tag
+      - name: Extract branch from tag
         id: parse
         env:
           CURR_PRE_TAG: ${{ inputs.curr_pre_tag }}
         run: |
           branch="${CURR_PRE_TAG%_IFU_*}"
-          date_part="${CURR_PRE_TAG#*_IFU_}"
-          date_part="${date_part%_pre}"
-          
           echo "Branch: $branch"
-          echo "Date: $date_part"
-          
           echo "branch=$branch" >> $GITHUB_OUTPUT
-          echo "date_part=$date_part" >> $GITHUB_OUTPUT
 
       - name: List commits in range
         run: |
           echo "Commits between ${{ inputs.prev_post_tag }} and ${{ inputs.curr_pre_tag }}:"
           git log ${{ inputs.prev_post_tag }}..${{ inputs.curr_pre_tag }} --oneline --no-merges
 
-      - name: Create parent issue
-        id: parent
-        env:
-          TARGET_REPO: ${{ inputs.target_repo }}
-          BRANCH: ${{ steps.parse.outputs.branch }}
-          DATE_PART: ${{ steps.parse.outputs.date_part }}
-          PREV_POST_TAG: ${{ inputs.prev_post_tag }}
-          CURR_PRE_TAG: ${{ inputs.curr_pre_tag }}
-          PROJECT_NUMBER: ${{ inputs.project_number }}
-          PROJECT_OWNER: ${{ inputs.project_owner }}
-        run: |
-          title="${BRANCH}: IFU ${DATE_PART}"
-          
-          body="ROCm-only commits between \`${PREV_POST_TAG}\` and \`${CURR_PRE_TAG}\`
-
-          Child issues will be listed below."
-          
-          parent_url=$(gh issue create \
-            --repo "${TARGET_REPO}" \
-            --title "${title}" \
-            --body "${body}")
-          
-          echo "Created parent: ${parent_url}"
-          
-          # Add parent to project
-          if [[ -n "${PROJECT_NUMBER}" ]]; then
-            echo "Adding parent to project..."
-            gh project item-add "${PROJECT_NUMBER}" --owner "${PROJECT_OWNER}" --url "${parent_url}" || echo "Warning: Failed to add to project"
-          fi
-          
-          parent_number="${parent_url##*/}"
-          echo "parent_url=$parent_url" >> $GITHUB_OUTPUT
-          echo "parent_number=$parent_number" >> $GITHUB_OUTPUT
-
-      - name: Create child issues
+      - name: Create issues for commits
         env:
           PREV_POST_TAG: ${{ inputs.prev_post_tag }}
           CURR_PRE_TAG: ${{ inputs.curr_pre_tag }}
@@ -108,85 +68,62 @@ jobs:
           PROJECT_NUMBER: ${{ inputs.project_number }}
           PROJECT_OWNER: ${{ inputs.project_owner }}
           REPO_NAME: ${{ github.repository }}
-          PARENT_NUMBER: ${{ steps.parent.outputs.parent_number }}
+          BRANCH: ${{ steps.parse.outputs.branch }}
         run: |
-          echo "Creating child issues..."
+          echo "Creating issues for commits..."
           
           git log "${PREV_POST_TAG}..${CURR_PRE_TAG}" --format="%H" --no-merges | while read hash; do
-            short_hash="${hash:0:7}"
+            short_hash="${hash:0:5}"
             subject=$(git log -1 --format="%s" "$hash")
             author=$(git log -1 --format="%an" "$hash")
             email=$(git log -1 --format="%ae" "$hash")
             
             echo "Processing ${short_hash}: ${subject}"
             
+            # Try to get GitHub username via API first
             gh_username=""
-            if [[ "$email" =~ ^[0-9]+\+([^@]+)@users\.noreply\.github\.com$ ]]; then
-              gh_username="${BASH_REMATCH[1]}"
-              echo "  Detected GitHub username: ${gh_username}"
+            gh_username=$(gh api "repos/${REPO_NAME}/commits/${hash}" --jq '.author.login // empty' 2>/dev/null || true)
+            
+            if [[ -z "${gh_username}" ]]; then
+              # Fallback: try to extract from noreply email
+              if [[ "$email" =~ ^[0-9]+\+([^@]+)@users\.noreply\.github\.com$ ]]; then
+                gh_username="${BASH_REMATCH[1]}"
+                echo "  Extracted username from email: ${gh_username}"
+              fi
+            else
+              echo "  Found GitHub username via API: ${gh_username}"
             fi
             
-            body="**Commit:** ${hash}
-          **Author:** ${author} (${email})
-          **Link:** [${short_hash}](https://github.com/${REPO_NAME}/commit/${hash})
-
-          Parent: #${PARENT_NUMBER}"
+            body="**Commit:** \`${hash}\`
+**Author:** ${author} (${email})
+**Branch:** \`${BRANCH}\`
+**Link:** [View commit](https://github.com/${REPO_NAME}/commit/${hash})"
             
             issue_url=$(gh issue create \
               --repo "${TARGET_REPO}" \
-              --title "Commit: ${short_hash} ${subject}" \
+              --title "${short_hash} ${subject}" \
               --body "${body}")
             
             echo "  Created: ${issue_url}"
             
+            # Try to assign the issue
             if [[ -n "${gh_username}" ]]; then
               echo "  Trying to assign to @${gh_username}..."
               if gh issue edit "${issue_url}" --add-assignee "${gh_username}" 2>/dev/null; then
-                echo "  Successfully Assigned Issue"
+                echo "  Successfully assigned issue"
               else
                 echo "  Could not assign, adding comment instead"
                 gh issue comment "${issue_url}" --body "cc @${gh_username} - you authored this commit" || true
               fi
             fi
             
+            # Add to project
             if [[ -n "${PROJECT_NUMBER}" ]]; then
               echo "  Adding to project..."
               gh project item-add "${PROJECT_NUMBER}" --owner "${PROJECT_OWNER}" --url "${issue_url}" || echo "  Warning: Failed to add to project"
             fi
             
-            child_number="${issue_url##*/}"
-            echo "${child_number}" >> /tmp/child_issues.txt
-            
             sleep 1
           done
           
-          echo "Done creating child issues!"
-
-      - name: Update parent with child links
-        env:
-          TARGET_REPO: ${{ inputs.target_repo }}
-          PARENT_NUMBER: ${{ steps.parent.outputs.parent_number }}
-          PREV_POST_TAG: ${{ inputs.prev_post_tag }}
-          CURR_PRE_TAG: ${{ inputs.curr_pre_tag }}
-        run: |
-          if [[ ! -f /tmp/child_issues.txt ]]; then
-            echo "No child issues found"
-            exit 0
-          fi
-          
-          child_links=""
-          while read child_number; do
-            child_links="${child_links}- #${child_number}
-          "
-          done < /tmp/child_issues.txt
-          
-          body="ROCm-only commits between \`${PREV_POST_TAG}\` and \`${CURR_PRE_TAG}\`
-
-          **Child issues:**
-          ${child_links}"
-          
-          gh issue edit "${PARENT_NUMBER}" \
-            --repo "${TARGET_REPO}" \
-            --body "${body}"
-          
-          echo "Updated parent issue with child links"
+          echo "Done creating issues!"
