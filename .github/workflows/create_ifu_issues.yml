@@ -60,6 +60,116 @@ jobs:
           echo "Commits between ${{ inputs.prev_post_tag }} and ${{ inputs.curr_pre_tag }}:"
           git log ${{ inputs.prev_post_tag }}..${{ inputs.curr_pre_tag }} --oneline --no-merges
 
+      - name: Get or create project fields
+        id: project_fields
+        if: ${{ inputs.project_number != '' }}
+        env:
+          PROJECT_NUMBER: ${{ inputs.project_number }}
+          PROJECT_OWNER: ${{ inputs.project_owner }}
+        run: |
+          echo "Getting project information..."
+          
+          # Get project node ID and existing fields
+          project_data=$(gh api graphql -f query='
+            query($owner: String!, $number: Int!) {
+              user(login: $owner) {
+                projectV2(number: $number) {
+                  id
+                  fields(first: 50) {
+                    nodes {
+                      ... on ProjectV2Field {
+                        id
+                        name
+                        dataType
+                      }
+                      ... on ProjectV2SingleSelectField {
+                        id
+                        name
+                        dataType
+                      }
+                    }
+                  }
+                }
+              }
+            }' -f owner="${PROJECT_OWNER}" -F number="${PROJECT_NUMBER}")
+          
+          project_id=$(echo "$project_data" | jq -r '.data.user.projectV2.id')
+          echo "Project ID: $project_id"
+          
+          if [[ "$project_id" == "null" || -z "$project_id" ]]; then
+            echo "Error: Could not find project. Trying organization query..."
+            project_data=$(gh api graphql -f query='
+              query($owner: String!, $number: Int!) {
+                organization(login: $owner) {
+                  projectV2(number: $number) {
+                    id
+                    fields(first: 50) {
+                      nodes {
+                        ... on ProjectV2Field {
+                          id
+                          name
+                          dataType
+                        }
+                        ... on ProjectV2SingleSelectField {
+                          id
+                          name
+                          dataType
+                        }
+                      }
+                    }
+                  }
+                }
+              }' -f owner="${PROJECT_OWNER}" -F number="${PROJECT_NUMBER}")
+            
+            project_id=$(echo "$project_data" | jq -r '.data.organization.projectV2.id')
+            fields_json=$(echo "$project_data" | jq -r '.data.organization.projectV2.fields.nodes')
+          else
+            fields_json=$(echo "$project_data" | jq -r '.data.user.projectV2.fields.nodes')
+          fi
+          
+          echo "Project ID: $project_id"
+          echo "project_id=$project_id" >> $GITHUB_OUTPUT
+          
+          # Find or create 'branch' field
+          branch_field_id=$(echo "$fields_json" | jq -r '.[] | select(.name == "branch") | .id')
+          if [[ -z "$branch_field_id" || "$branch_field_id" == "null" ]]; then
+            echo "Creating 'branch' field..."
+            branch_field_id=$(gh api graphql -f query='
+              mutation($projectId: ID!, $name: String!) {
+                createProjectV2Field(input: {projectId: $projectId, dataType: TEXT, name: $name}) {
+                  projectV2Field {
+                    ... on ProjectV2Field {
+                      id
+                    }
+                  }
+                }
+              }' -f projectId="$project_id" -f name="branch" --jq '.data.createProjectV2Field.projectV2Field.id')
+            echo "Created 'branch' field: $branch_field_id"
+          else
+            echo "Found existing 'branch' field: $branch_field_id"
+          fi
+          echo "branch_field_id=$branch_field_id" >> $GITHUB_OUTPUT
+          
+          # Find or create 'commit_hash' field
+          commit_hash_field_id=$(echo "$fields_json" | jq -r '.[] | select(.name == "commit_hash") | .id')
+          if [[ -z "$commit_hash_field_id" || "$commit_hash_field_id" == "null" ]]; then
+            echo "Creating 'commit_hash' field..."
+            commit_hash_field_id=$(gh api graphql -f query='
+              mutation($projectId: ID!, $name: String!) {
+                createProjectV2Field(input: {projectId: $projectId, dataType: TEXT, name: $name}) {
+                  projectV2Field {
+                    ... on ProjectV2Field {
+                      id
+                    }
+                  }
+                }
+              }' -f projectId="$project_id" -f name="commit_hash" --jq '.data.createProjectV2Field.projectV2Field.id')
+            echo "Created 'commit_hash' field: $commit_hash_field_id"
+          else
+            echo "Found existing 'commit_hash' field: $commit_hash_field_id"
+          fi
+          echo "commit_hash_field_id=$commit_hash_field_id" >> $GITHUB_OUTPUT
+
       - name: Create issues for commits
         env:
           PREV_POST_TAG: ${{ inputs.prev_post_tag }}
@@ -69,6 +179,9 @@ jobs:
           PROJECT_OWNER: ${{ inputs.project_owner }}
           REPO_NAME: ${{ github.repository }}
           BRANCH: ${{ steps.parse.outputs.branch }}
+          PROJECT_ID: ${{ steps.project_fields.outputs.project_id }}
+          BRANCH_FIELD_ID: ${{ steps.project_fields.outputs.branch_field_id }}
+          COMMIT_HASH_FIELD_ID: ${{ steps.project_fields.outputs.commit_hash_field_id }}
         run: |
           echo "Creating issues for commits..."
           
@@ -114,10 +227,52 @@ jobs:
               fi
             fi
             
-            # Add to project
-            if [[ -n "${PROJECT_NUMBER}" ]]; then
+            # Add to project and set field values
+            if [[ -n "${PROJECT_NUMBER}" && -n "${PROJECT_ID}" ]]; then
               echo "  Adding to project..."
-              gh project item-add "${PROJECT_NUMBER}" --owner "${PROJECT_OWNER}" --url "${issue_url}" || echo "  Warning: Failed to add to project"
+              item_id=$(gh project item-add "${PROJECT_NUMBER}" --owner "${PROJECT_OWNER}" --url "${issue_url}" --format json 2>/dev/null | jq -r '.id' || true)
+              
+              if [[ -n "${item_id}" && "${item_id}" != "null" ]]; then
+                echo "  Project item ID: ${item_id}"
+                
+                # Set branch field
+                if [[ -n "${BRANCH_FIELD_ID}" ]]; then
+                  echo "  Setting branch field to: ${BRANCH}"
+                  gh api graphql -f query='
+                    mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $value: String!) {
+                      updateProjectV2ItemFieldValue(input: {
+                        projectId: $projectId
+                        itemId: $itemId
+                        fieldId: $fieldId
+                        value: {text: $value}
+                      }) {
+                        projectV2Item {
+                          id
+                        }
+                      }
+                    }' -f projectId="${PROJECT_ID}" -f itemId="${item_id}" -f fieldId="${BRANCH_FIELD_ID}" -f value="${BRANCH}" || echo "  Warning: Failed to set branch field"
+                fi
+                
+                # Set commit_hash field
+                if [[ -n "${COMMIT_HASH_FIELD_ID}" ]]; then
+                  echo "  Setting commit_hash field to: ${hash}"
+                  gh api graphql -f query='
+                    mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $value: String!) {
+                      updateProjectV2ItemFieldValue(input: {
+                        projectId: $projectId
+                        itemId: $itemId
+                        fieldId: $fieldId
+                        value: {text: $value}
+                      }) {
+                        projectV2Item {
+                          id
+                        }
+                      }
+                    }' -f projectId="${PROJECT_ID}" -f itemId="${item_id}" -f fieldId="${COMMIT_HASH_FIELD_ID}" -f value="${hash}" || echo "  Warning: Failed to set commit_hash field"
+                fi
+              else
+                echo "  Warning: Could not get project item ID"
+              fi
             fi
             
             sleep 1
