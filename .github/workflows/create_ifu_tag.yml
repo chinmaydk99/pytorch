@@ -17,6 +17,7 @@ on:
 permissions:
   contents: write        # create/push tags
   pull-requests: write   # edit PR body
+  issues: write
 
 jobs:
   tag-ifu:
