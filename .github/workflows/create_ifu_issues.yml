@@ -1,6 +1,7 @@
 name: Create issues for ROCm commits
 
 on:
+  # Manual trigger for testing
   workflow_dispatch:
     inputs:
       prev_post_tag:
@@ -27,6 +28,36 @@ on:
         default: "chinmaydk99"
         type: string
 
+  # Called by create_ifu_tag.yml after tagging
+  workflow_call:
+    inputs:
+      prev_post_tag:
+        description: "Previous IFU post tag"
+        required: true
+        type: string
+      curr_pre_tag:
+        description: "Current IFU pre tag"
+        required: true
+        type: string
+      target_repo:
+        description: "Target repo for issue creation"
+        required: false
+        default: "chinmaydk99/pytorch"
+        type: string
+      project_number:
+        description: "GitHub Project number"
+        required: false
+        default: "7"
+        type: string
+      project_owner:
+        description: "Project owner"
+        required: false
+        default: "chinmaydk99"
+        type: string
+    secrets:
+      IFU_GITHUB_TOKEN:
+        required: true
+
 permissions:
   contents: read
   issues: write
@@ -35,6 +66,7 @@ jobs:
   create-issues:
     runs-on: ubuntu-latest
     env:
+      # Use passed secret for workflow_call, direct secret for workflow_dispatch
       GH_TOKEN: ${{ secrets.IFU_GITHUB_TOKEN }}
 
     steps:
@@ -211,7 +243,7 @@ jobs:
             
             issue_url=$(gh issue create \
               --repo "${TARGET_REPO}" \
-              --title "${short_hash} ${subject}" \
+              --title "${subject}" \
               --body "${body}")
             
             echo "  Created: ${issue_url}"
