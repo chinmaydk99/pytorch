@@ -5,23 +5,31 @@ on:
   pull_request:
     types: [closed]
 
-  # NEW: Test harness - manually trigger to test the "find previous post tag" logic
-  # without actually merging a PR or creating tags
+  # Test harness - manually trigger to test without a real PR merge
   workflow_dispatch:
     inputs:
       test_branch:
         description: "Branch name to test (e.g., rocm7.1_internal_testing)"
         required: true
         type: string
+      test_curr_pre_tag:
+        description: "Pre tag to use as curr_pre_tag (required for full chain test)"
+        required: false
+        type: string
+      run_full_chain:
+        description: "Run full chain - actually call create_ifu_issues.yml (will create real issues!)"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write        # create/push tags
   pull-requests: write   # edit PR body
-  issues: write
+  issues: write          # needed for create_ifu_issues.yml when called
 
 jobs:
   tag-ifu:
-    # MODIFIED: Run for workflow_dispatch (test mode) OR for real PR merges
+    # Run for workflow_dispatch (test mode) OR for real PR merges
     if: >
       github.event_name == 'workflow_dispatch' ||
       (github.event.pull_request.merged == true &&
@@ -29,21 +37,33 @@ jobs:
       contains(github.event.pull_request.title, 'IFU'))
     runs-on: ubuntu-latest
 
-    # NEW: Export values so the create-issues job can use them
+    # Export values so the create-issues job can use them
     outputs:
       prev_post_tag: ${{ steps.prev_tag.outputs.prev_post_tag }}
-      curr_pre_tag: ${{ steps.tagname.outputs.PRE_TAG }}
+      curr_pre_tag: ${{ github.event_name == 'workflow_dispatch' && inputs.test_curr_pre_tag || steps.tagname.outputs.PRE_TAG }}
       has_prev_tag: ${{ steps.prev_tag.outputs.has_prev_tag }}
 
     steps:
+      - name: Validate test inputs
+        if: github.event_name == 'workflow_dispatch' && inputs.run_full_chain == true
+        run: |
+          if [[ -z "${{ inputs.test_curr_pre_tag }}" ]]; then
+            echo "ERROR: test_curr_pre_tag is required when run_full_chain is enabled"
+            echo "Please provide an existing pre tag (e.g., rocm7.1_internal_testing_IFU_2025-10-29_pre)"
+            exit 1
+          fi
+          echo "Full chain test enabled with:"
+          echo "  test_branch: ${{ inputs.test_branch }}"
+          echo "  test_curr_pre_tag: ${{ inputs.test_curr_pre_tag }}"
+
       - name: Checkout base repo (full history)
         uses: actions/checkout@v4
         with:
-          # MODIFIED: Use current branch for test mode, PR base branch for real merges
+          # Use current branch for test mode, PR base branch for real merges
           ref: ${{ github.event_name == 'workflow_dispatch' && github.ref || github.event.pull_request.base.ref }}
           fetch-depth: 0
 
-      # NEW: Fetch all tags so we can find the previous post tag
+      # Fetch all tags so we can find the previous post tag
       - name: Fetch all tags
         run: git fetch origin --tags --force
 
@@ -54,7 +74,7 @@ jobs:
 
       - name: Derive key SHAs (rocm base, upstream main, merge)
         id: shas
-        # NEW: Skip in test mode - we don't have a real PR
+        # Skip in test mode - we don't have a real PR
         if: github.event_name != 'workflow_dispatch'
         shell: bash
         run: |
@@ -101,7 +121,7 @@ jobs:
 
       - name: Extract tag base from PR title
         id: tagname
-        # NEW: Skip in test mode
+        # Skip in test mode
         if: github.event_name != 'workflow_dispatch'
         run: |
           TITLE="${{ github.event.pull_request.title }}"
@@ -113,7 +133,7 @@ jobs:
           echo "PRE_TAG=${BASE_TAG}_pre" 
           echo "POST_TAG=${BASE_TAG}_post" 
           
-          # NEW: Extract branch name from BASE_TAG (everything before _IFU_)
+          # Extract branch name from BASE_TAG (everything before _IFU_)
           BRANCH="${BASE_TAG%_IFU_*}"
           echo "BRANCH=$BRANCH"
           
@@ -122,7 +142,7 @@ jobs:
           echo "POST_TAG=${BASE_TAG}_post" >> $GITHUB_OUTPUT
           echo "BRANCH=$BRANCH" >> $GITHUB_OUTPUT
 
-      # NEW: Find the most recent post tag for this branch
+      # Find the most recent post tag for this branch
       # This is needed to know the range of commits for issue creation
       - name: Find previous post tag
         id: prev_tag
@@ -150,13 +170,15 @@ jobs:
             echo "has_prev_tag=true" >> $GITHUB_OUTPUT
           fi
 
-      # NEW: In test mode, print a summary of what was found
+      # In test mode, print a summary of what was found
       - name: Test mode summary
         if: github.event_name == 'workflow_dispatch'
         env:
           BRANCH: ${{ inputs.test_branch }}
           PREV_POST_TAG: ${{ steps.prev_tag.outputs.prev_post_tag }}
           HAS_PREV_TAG: ${{ steps.prev_tag.outputs.has_prev_tag }}
+          TEST_CURR_PRE_TAG: ${{ inputs.test_curr_pre_tag }}
+          RUN_FULL_CHAIN: ${{ inputs.run_full_chain }}
         run: |
           echo "=========================================="
           echo "TEST MODE SUMMARY"
@@ -165,15 +187,23 @@ jobs:
           echo "Has previous post tag: ${HAS_PREV_TAG}"
           echo "Previous post tag: ${PREV_POST_TAG:-'(none)'}"
           echo ""
-          echo "In a real IFU merge, this workflow would:"
-          echo "1. Create new pre/post tags"
-          echo "2. Call create_ifu_issues.yml with:"
-          echo "   - prev_post_tag: ${PREV_POST_TAG:-'(none)'}"
-          echo "   - curr_pre_tag: {branch}_IFU_{date}_pre (newly created)"
+          if [[ "${RUN_FULL_CHAIN}" == "true" ]]; then
+            echo "🚀 FULL CHAIN TEST ENABLED"
+            echo "Will call create_ifu_issues.yml with:"
+            echo "   - prev_post_tag: ${PREV_POST_TAG}"
+            echo "   - curr_pre_tag: ${TEST_CURR_PRE_TAG}"
+            echo ""
+            echo "⚠️  WARNING: This will create REAL issues!"
+          else
+            echo "ℹ️  Full chain test NOT enabled"
+            echo "To test issue creation, re-run with:"
+            echo "   - run_full_chain: true"
+            echo "   - test_curr_pre_tag: (an existing pre tag)"
+          fi
           echo "=========================================="
 
       - name: Create pre/post tags 
-        # NEW: Skip in test mode
+        # Skip in test mode
         if: github.event_name != 'workflow_dispatch'
         shell: bash
         run: |
@@ -190,7 +220,7 @@ jobs:
           git push origin "refs/tags/${{ steps.tagname.outputs.POST_TAG  }}" -f
 
       - name: Append rocm_base & upstream_main to PR body
-        # NEW: Skip in test mode
+        # Skip in test mode
         if: github.event_name != 'workflow_dispatch'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -208,13 +238,15 @@ jobs:
           gh api --method PATCH -H  "Accept: application/vnd.github+json" \
             repos/${{ github.repository }}/pulls/$PR -F body=@body.txt
 
-  # NEW: Second job - calls create_ifu_issues.yml after tagging
-  # Only runs for real PR merges (not test mode) and only if a previous tag exists
+  # Calls create_ifu_issues.yml after tagging
+  # Runs for:
+  #   - Real PR merges (when previous tag exists)
+  #   - Test mode with run_full_chain=true (when previous tag exists)
   create-issues:
     needs: tag-ifu
     if: >
-      github.event_name != 'workflow_dispatch' &&
-      needs.tag-ifu.outputs.has_prev_tag == 'true'
+      needs.tag-ifu.outputs.has_prev_tag == 'true' &&
+      (github.event_name != 'workflow_dispatch' || inputs.run_full_chain == true)
     uses: ./.github/workflows/create_ifu_issues.yml
     with:
       prev_post_tag: ${{ needs.tag-ifu.outputs.prev_post_tag }}
