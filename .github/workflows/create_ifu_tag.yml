@@ -16,6 +16,10 @@ on:
         description: "Pre tag to use as curr_pre_tag (required for full chain test)"
         required: false
         type: string
+      test_issue_prev_ref:
+        description: "Optional issue range start ref for cold-start full-chain test (tag or SHA)"
+        required: false
+        type: string
       run_full_chain:
         description: "Run full chain - actually call create_ifu_issues.yml (will create real issues!)"
         required: false
@@ -42,6 +46,8 @@ jobs:
       prev_post_tag: ${{ steps.prev_tag.outputs.prev_post_tag }}
       curr_pre_tag: ${{ github.event_name == 'workflow_dispatch' && inputs.test_curr_pre_tag || steps.tagname.outputs.PRE_TAG }}
       has_prev_tag: ${{ steps.prev_tag.outputs.has_prev_tag }}
+      issue_prev_ref: ${{ steps.prev_ref.outputs.issue_prev_ref }}
+      can_create_issues: ${{ steps.prev_ref.outputs.can_create_issues }}
 
     steps:
       - name: Validate test inputs
@@ -55,6 +61,9 @@ jobs:
           echo "Full chain test enabled with:"
           echo "  test_branch: ${{ inputs.test_branch }}"
           echo "  test_curr_pre_tag: ${{ inputs.test_curr_pre_tag }}"
+          if [[ -n "${{ inputs.test_issue_prev_ref }}" ]]; then
+            echo "  test_issue_prev_ref: ${{ inputs.test_issue_prev_ref }}"
+          fi
 
       - name: Checkout base repo (full history)
         uses: actions/checkout@v4
@@ -170,6 +179,18 @@ jobs:
             echo "has_prev_tag=true" >> $GITHUB_OUTPUT
           fi
 
+      - name: Validate full-chain test start ref
+        if: github.event_name == 'workflow_dispatch' && inputs.run_full_chain == true
+        env:
+          HAS_PREV_TAG: ${{ steps.prev_tag.outputs.has_prev_tag }}
+          TEST_ISSUE_PREV_REF: ${{ inputs.test_issue_prev_ref }}
+        run: |
+          if [[ "${HAS_PREV_TAG}" != "true" && -z "${TEST_ISSUE_PREV_REF}" ]]; then
+            echo "ERROR: No previous post tag found for this branch."
+            echo "For cold-start full-chain tests, provide test_issue_prev_ref (tag or SHA)."
+            exit 1
+          fi
+
       # In test mode, print a summary of what was found
       - name: Test mode summary
         if: github.event_name == 'workflow_dispatch'
@@ -178,6 +199,7 @@ jobs:
           PREV_POST_TAG: ${{ steps.prev_tag.outputs.prev_post_tag }}
           HAS_PREV_TAG: ${{ steps.prev_tag.outputs.has_prev_tag }}
           TEST_CURR_PRE_TAG: ${{ inputs.test_curr_pre_tag }}
+          TEST_ISSUE_PREV_REF: ${{ inputs.test_issue_prev_ref }}
           RUN_FULL_CHAIN: ${{ inputs.run_full_chain }}
         run: |
           echo "=========================================="
@@ -192,6 +214,9 @@ jobs:
             echo "Will call create_ifu_issues.yml with:"
             echo "   - prev_post_tag: ${PREV_POST_TAG}"
             echo "   - curr_pre_tag: ${TEST_CURR_PRE_TAG}"
+            if [[ -n "${TEST_ISSUE_PREV_REF}" ]]; then
+              echo "   - test_issue_prev_ref override: ${TEST_ISSUE_PREV_REF}"
+            fi
             echo ""
             echo "⚠️  WARNING: This will create REAL issues!"
           else
@@ -201,6 +226,38 @@ jobs:
             echo "   - test_curr_pre_tag: (an existing pre tag)"
           fi
           echo "=========================================="
+
+      # Determine the start reference for issue creation.
+      # Priority:
+      #   1) previous IFU post tag (normal path)
+      #   2) test_issue_prev_ref (cold-start fallback for workflow_dispatch test path)
+      #   3) UPSTREAM_MAIN_SHA (cold-start fallback on real merge path only)
+      - name: Resolve issue range start reference
+        id: prev_ref
+        env:
+          HAS_PREV_TAG: ${{ steps.prev_tag.outputs.has_prev_tag }}
+          PREV_POST_TAG: ${{ steps.prev_tag.outputs.prev_post_tag }}
+          TEST_ISSUE_PREV_REF: ${{ inputs.test_issue_prev_ref }}
+          EVENT_NAME: ${{ github.event_name }}
+          UPSTREAM_MAIN_SHA: ${{ steps.shas.outputs.UPSTREAM_MAIN_SHA }}
+        run: |
+          if [[ "${HAS_PREV_TAG}" == "true" && -n "${PREV_POST_TAG}" ]]; then
+            echo "Using previous IFU post tag for issue range start: ${PREV_POST_TAG}"
+            echo "issue_prev_ref=${PREV_POST_TAG}" >> "$GITHUB_OUTPUT"
+            echo "can_create_issues=true" >> "$GITHUB_OUTPUT"
+          elif [[ "${EVENT_NAME}" == "workflow_dispatch" && -n "${TEST_ISSUE_PREV_REF}" ]]; then
+            echo "Using test override for issue range start: ${TEST_ISSUE_PREV_REF}"
+            echo "issue_prev_ref=${TEST_ISSUE_PREV_REF}" >> "$GITHUB_OUTPUT"
+            echo "can_create_issues=true" >> "$GITHUB_OUTPUT"
+          elif [[ "${EVENT_NAME}" != "workflow_dispatch" && -n "${UPSTREAM_MAIN_SHA}" ]]; then
+            echo "No previous IFU post tag found; using cold-start fallback UPSTREAM_MAIN_SHA: ${UPSTREAM_MAIN_SHA}"
+            echo "issue_prev_ref=${UPSTREAM_MAIN_SHA}" >> "$GITHUB_OUTPUT"
+            echo "can_create_issues=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Could not determine issue range start reference."
+            echo "issue_prev_ref=" >> "$GITHUB_OUTPUT"
+            echo "can_create_issues=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Create pre/post tags 
         # Skip in test mode
@@ -240,16 +297,16 @@ jobs:
 
   # Calls create_ifu_issues.yml after tagging
   # Runs for:
-  #   - Real PR merges (when previous tag exists)
-  #   - Test mode with run_full_chain=true (when previous tag exists)
+  #   - Real PR merges (when a start reference can be resolved)
+  #   - Test mode with run_full_chain=true (when a start reference can be resolved)
   create-issues:
     needs: tag-ifu
     if: >
-      needs.tag-ifu.outputs.has_prev_tag == 'true' &&
+      needs.tag-ifu.outputs.can_create_issues == 'true' &&
       (github.event_name != 'workflow_dispatch' || inputs.run_full_chain == true)
     uses: ./.github/workflows/create_ifu_issues.yml
     with:
-      prev_post_tag: ${{ needs.tag-ifu.outputs.prev_post_tag }}
+      prev_post_tag: ${{ needs.tag-ifu.outputs.issue_prev_ref }}
       curr_pre_tag: ${{ needs.tag-ifu.outputs.curr_pre_tag }}
     secrets:
       IFU_GITHUB_TOKEN: ${{ secrets.IFU_GITHUB_TOKEN }}
