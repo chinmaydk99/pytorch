@@ -79,13 +79,13 @@ jobs:
           git fetch ${UPSTREAM_REMOTE} ${UPSTREAM_BRANCH}
           git fetch ${DOWNSTREAM_REMOTE} ${DOWNSTREAM_BRANCH}
 
-      - name: Compute date tag and create working branch
+      - name: Compute IFU branch tag and create working branch
         working-directory: ${{ env.DOWNSTREAM_REPO }}
         id: tag
         shell: bash
         run: |
-          DATE="$(date +"%Y%m%d")"
-          TAG="${DOWNSTREAM_BRANCH}_IFU_${DATE}"
+          STAMP="$(date +"%Y%m%d_%H%M%S")"
+          TAG="${DOWNSTREAM_BRANCH}_IFU_${STAMP}"
           echo "TAG=${TAG}" >> $GITHUB_OUTPUT
           # Start from rocm branch
           git checkout -b "$TAG" "${DOWNSTREAM_REMOTE}/${DOWNSTREAM_BRANCH}"
