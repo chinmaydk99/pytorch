@@ -15,17 +15,17 @@ on:
       target_repo:
         description: "Target repo for issue creation"
         required: false
-        default: "ROCm/pytorch"
+        default: "chinmaydk99/pytorch"
         type: string
       project_number:
         description: "GitHub Project number"
         required: false
-        default: "114"
+        default: "7"
         type: string
       project_owner:
         description: "Project owner"
         required: false
-        default: "ROCm"
+        default: "chinmaydk99"
         type: string
 
   # Called by create_ifu_tag.yml after tagging
@@ -42,17 +42,17 @@ on:
       target_repo:
         description: "Target repo for issue creation"
         required: false
-        default: "ROCm/pytorch"
+        default: "chinmaydk99/pytorch"
         type: string
       project_number:
         description: "GitHub Project number"
         required: false
-        default: "114"
+        default: "7"
         type: string
       project_owner:
         description: "Project owner"
         required: false
-        default: "ROCm"
+        default: "chinmaydk99"
         type: string
     secrets:
       IFU_GITHUB_TOKEN:
