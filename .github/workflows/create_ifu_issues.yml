@@ -15,17 +15,17 @@ on:
       target_repo:
         description: "Target repo for issue creation"
         required: false
-        default: "chinmaydk99/pytorch"
+        default: "ROCm/pytorch"
         type: string
       project_number:
         description: "GitHub Project number"
         required: false
-        default: "7"
+        default: "114"
         type: string
       project_owner:
         description: "Project owner"
         required: false
-        default: "chinmaydk99"
+        default: "ROCm"
         type: string
 
   # Called by create_ifu_tag.yml after tagging
@@ -42,17 +42,17 @@ on:
       target_repo:
         description: "Target repo for issue creation"
         required: false
-        default: "chinmaydk99/pytorch"
+        default: "ROCm/pytorch"
         type: string
       project_number:
         description: "GitHub Project number"
         required: false
-        default: "7"
+        default: "114"
         type: string
       project_owner:
         description: "Project owner"
         required: false
-        default: "chinmaydk99"
+        default: "ROCm"
         type: string
     secrets:
       IFU_GITHUB_TOKEN:
@@ -173,44 +173,67 @@ jobs:
           echo "Project ID: $project_id"
           echo "project_id=$project_id" >> $GITHUB_OUTPUT
 
-          # Find or create 'branch' field
-          branch_field_id=$(echo "$fields_json" | jq -r '.[] | select(.name == "branch") | .id')
-          if [[ -z "$branch_field_id" || "$branch_field_id" == "null" ]]; then
-            echo "Creating 'branch' field..."
-            branch_field_id=$(gh api graphql -f query='
+          # Helper: resolve a field by name — check cached fields, try create, re-query on conflict.
+          resolve_field() {
+            local field_name="$1"
+            local cached_fields="$2"
+            local proj_id="$3"
+
+            # 1) Check cached fields from initial query
+            local fid
+            fid=$(echo "$cached_fields" | jq -r --arg n "$field_name" '.[] | select(.name | ascii_downcase == ($n | ascii_downcase)) | .id' 2>/dev/null || true)
+            if [[ -n "$fid" && "$fid" != "null" ]]; then
+              echo "Found existing '$field_name' field: $fid" >&2
+              echo "$fid"
+              return
+            fi
+
+            # 2) Try to create it
+            echo "Field '$field_name' not found. Creating..." >&2
+            local result
+            result=$(gh api graphql -f query='
               mutation($projectId: ID!, $name: String!) {
                 createProjectV2Field(input: {projectId: $projectId, dataType: TEXT, name: $name}) {
-                  projectV2Field {
-                    ... on ProjectV2Field {
-                      id
+                  projectV2Field { ... on ProjectV2Field { id } }
+                }
+              }' -f projectId="$proj_id" -f name="$field_name" 2>&1 || true)
+            fid=$(echo "$result" | jq -r '.data.createProjectV2Field.projectV2Field.id // empty' 2>/dev/null || true)
+            if [[ -n "$fid" ]]; then
+              echo "Created '$field_name' field: $fid" >&2
+              echo "$fid"
+              return
+            fi
+
+            # 3) Create failed (already exists). Re-query project fields to find its ID.
+            echo "Create failed (field likely exists). Re-querying project fields..." >&2
+            local requery
+            requery=$(gh api graphql -f query='
+              query($pid: ID!) {
+                node(id: $pid) {
+                  ... on ProjectV2 {
+                    fields(first: 50) {
+                      nodes {
+                        ... on ProjectV2Field { id name }
+                        ... on ProjectV2SingleSelectField { id name }
+                        ... on ProjectV2IterationField { id name }
+                      }
                     }
                   }
                 }
-              }' -f projectId="$project_id" -f name="branch" --jq '.data.createProjectV2Field.projectV2Field.id')
-            echo "Created 'branch' field: $branch_field_id"
-          else
-            echo "Found existing 'branch' field: $branch_field_id"
-          fi
+              }' -f pid="$proj_id" 2>/dev/null || true)
+            fid=$(echo "$requery" | jq -r --arg n "$field_name" '.data.node.fields.nodes[] | select(.name | ascii_downcase == ($n | ascii_downcase)) | .id' 2>/dev/null || true)
+            if [[ -n "$fid" && "$fid" != "null" ]]; then
+              echo "Found '$field_name' field via re-query: $fid" >&2
+              echo "$fid"
+            else
+              echo "Warning: Could not resolve '$field_name' field ID." >&2
+            fi
+          }
+
+          branch_field_id=$(resolve_field "branch" "$fields_json" "$project_id")
           echo "branch_field_id=$branch_field_id" >> $GITHUB_OUTPUT
 
-          # Find or create 'commit_hash' field
-          commit_hash_field_id=$(echo "$fields_json" | jq -r '.[] | select(.name == "commit_hash") | .id')
-          if [[ -z "$commit_hash_field_id" || "$commit_hash_field_id" == "null" ]]; then
-            echo "Creating 'commit_hash' field..."
-            commit_hash_field_id=$(gh api graphql -f query='
-              mutation($projectId: ID!, $name: String!) {
-                createProjectV2Field(input: {projectId: $projectId, dataType: TEXT, name: $name}) {
-                  projectV2Field {
-                    ... on ProjectV2Field {
-                      id
-                    }
-                  }
-                }
-              }' -f projectId="$project_id" -f name="commit_hash" --jq '.data.createProjectV2Field.projectV2Field.id')
-            echo "Created 'commit_hash' field: $commit_hash_field_id"
-          else
-            echo "Found existing 'commit_hash' field: $commit_hash_field_id"
-          fi
+          commit_hash_field_id=$(resolve_field "commit_hash" "$fields_json" "$project_id")
           echo "commit_hash_field_id=$commit_hash_field_id" >> $GITHUB_OUTPUT
 
       - name: Create issues for commits
