@@ -1,17 +1,19 @@
 #define TORCH_ASSERT_ONLY_METHOD_OPERATORS
 #include <ATen/Dispatch.h>
 #include <ATen/core/Tensor.h>
-#include <ATen/hip/HIPContext.h>
-#include <ATen/hip/nvrtc_stub/ATenNVRTC.h>
-// #include <c10/hip/HIPGuard.h>
+#include <ATen/cuda/CUDAContext.h>
+#include <ATen/cuda/nvrtc_stub/ATenNVRTC.h>
+#include <c10/cuda/CUDAGuard.h>
+#if defined(USE_ROCM)
 #include <ATen/hip/impl/HIPGuardImplMasqueradingAsCUDA.h>
+#endif
 
 // Two warnings in Cutlass included header files
 C10_DIAGNOSTIC_PUSH_AND_IGNORED_IF_DEFINED("-Wset-but-not-used")
 C10_DIAGNOSTIC_PUSH_AND_IGNORED_IF_DEFINED("-Wunused-but-set-parameter")
 C10_DIAGNOSTIC_PUSH_AND_IGNORED_IF_DEFINED("-Wunused-but-set-variable")
 
-#if !defined(USE_ROCM) && !defined(_WIN32) && defined(TORCH_HIP_VERSION)
+#if !defined(USE_ROCM) && !defined(_WIN32) && defined(CUDA_VERSION)
 #define BUILD_ASYNC_MM_KERNEL
 #endif
 
@@ -256,34 +258,34 @@ struct AsyncGemmConfig
     static constexpr ck_tile::index_t M_Tile = 128;
     static constexpr ck_tile::index_t N_Tile = 256;
     static constexpr ck_tile::index_t K_Tile = 128 / sizeof(PrecType);
-    
+
     static constexpr ck_tile::index_t M_Warp = 2;
     static constexpr ck_tile::index_t N_Warp = 1;
     static constexpr ck_tile::index_t K_Warp = 1;
-    
+
     static constexpr ck_tile::index_t M_Warp_Tile = 32;
     static constexpr ck_tile::index_t N_Warp_Tile = 32;
-    static constexpr ck_tile::index_t K_Warp_Tile = 
-        get_k_warp_tile<PrecType, M_Warp_Tile>(); 
-    
+    static constexpr ck_tile::index_t K_Warp_Tile =
+        get_k_warp_tile<PrecType, M_Warp_Tile>();
+
     static constexpr bool kPadM = false;
     static constexpr bool kPadN = false;
     static constexpr bool kPadK = false;
-    
+
     static constexpr bool DoubleSmemBuffer = false;
     static constexpr ck_tile::GemmPipeline Pipeline = ck_tile::GemmPipeline::COMPUTE_V3;
     static constexpr auto Scheduler = ck_tile::GemmPipelineScheduler::Intrawave;  // Change
-    
+
     static constexpr bool TransposeC = false;
     static constexpr bool UseStructuredSparsity = false;
     static constexpr ck_tile::index_t NumWaveGroups = 2;
     static constexpr bool Preshuffle = false;
-    
+
     static constexpr ck_tile::index_t TileParitionerGroupNum = 8;
     static constexpr ck_tile::index_t TileParitionerM01 = 4;
     static constexpr bool PermuteA = false;
     static constexpr bool PermuteB = false;
-    
+
     static constexpr int kBlockPerCu = 2;
 };
 
@@ -301,12 +303,12 @@ at::Tensor async_input_mm_impl_ck_tile(
 
   using ElementA = ck_tile::bf16_t;
   using LayoutA = ck_tile::tensor_layout::gemm::RowMajor;
-  
+
   using ElementB = ck_tile::bf16_t;
-  
+
   using ElementC = ck_tile::bf16_t;
   using LayoutC = ck_tile::tensor_layout::gemm::RowMajor;
-  
+
   using ElementAccumulator = float;
 
   TORCH_CHECK(a.dim() == 2 && b.dim() == 2 && out.dim() == 2);
@@ -340,7 +342,7 @@ at::Tensor async_input_mm_impl_ck_tile(
 
   // Set up GEMM configuration using CK tile
   using GemmConfig = AsyncGemmConfig<ElementA>;
-  
+
   using GemmShape = ck_tile::TileGemmShape<
       ck_tile::sequence<GemmConfig::M_Tile, GemmConfig::N_Tile, GemmConfig::K_Tile>,
       ck_tile::sequence<GemmConfig::M_Warp, GemmConfig::N_Warp, GemmConfig::K_Warp>,
@@ -412,7 +414,7 @@ at::Tensor async_input_mm_impl_ck_tile(
   TORCH_CHECK(chunk_size_M % tile_size_M == 0,
               "async_input_mm: chunk_size_M must be divisible by tile_size_M");
 
-  const ck_tile::index_t tiles_m = 
+  const ck_tile::index_t tiles_m =
       ck_tile::integer_divide_ceil(M, static_cast<ck_tile::index_t>(tile_size_M));
   const ck_tile::index_t tiles_per_chunk = chunk_size_M / tile_size_M;
   const ck_tile::index_t tile_idx_pivot = a_chunk_pivot * tiles_per_chunk;
@@ -463,7 +465,7 @@ at::Tensor async_input_mm_impl_ck_tile(
       false,
       0
   };
-  
+
 //   const dim3 grids = Kernel::GridSize(512, 1, 1);  // Use problem-based grid size
   const dim3 grids = Kernel::MaxOccupancyGridSize(stream_cfg);
   const dim3 blocks = Kernel::BlockSize();
@@ -472,7 +474,7 @@ at::Tensor async_input_mm_impl_ck_tile(
   std::cout << "[ROCM AsyncMM] IsSupportedArgument: " << (is_supported ? "true" : "false") << std::endl;
   std::cout << "[ROCM AsyncMM] Grid: {" << grids.x << ", " << grids.y << ", " << grids.z << "}" << std::endl;
   std::cout << "[ROCM AsyncMM] Blocks: {" << blocks.x << ", " << blocks.y << ", " << blocks.z << "}" << std::endl;
-  
+
   TORCH_CHECK(is_supported,
               "async_input_mm: Arguments not supported by CK tile kernel");
 
