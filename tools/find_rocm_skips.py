@@ -44,12 +44,9 @@ ROCM_SKIP_COUNT_LINE_RE = re.compile(r"^-\s*ROCm-skipped tests:\s*\d+\s*$", re.M
 ROCM_SKIP_DECORATOR_SUFFIXES = {
     "skipifrocm",
     "skipifrocmarch",
-    "skipifrocmversionlessthan",
     "skipifrocmmultiprocess",
     "skipifrocmarchmultiprocess",
-    "skipifrocmverlessthanmultiprocess",
     "skipcudaifrocm",
-    "skipcudaifrocmversionlessthan",
     "skiponrocm",
     "skiprocmiiftorchinductor",
 }
@@ -58,7 +55,11 @@ ROCM_SKIP_CALL_SUFFIXES = ROCM_SKIP_DECORATOR_SUFFIXES | {
 }
 NON_ROCM_SKIP_DECORATOR_SUFFIXES = {
     "skipcudaifnotrocm",
+    "skipcudaifnohipdnn",
     "runonrocm",
+    "skipifrocmversionlessthan",
+    "skipifrocmverlessthanmultiprocess",
+    "skipcudaifrocmversionlessthan",
 }
 
 
@@ -114,36 +115,107 @@ def is_none_constant(node: ast.AST) -> bool:
     return isinstance(node, ast.Constant) and node.value is None
 
 
-def classify_condition_text(text: str) -> Tuple[Optional[str], Optional[str]]:
+def _is_rocm_indicator(node: ast.AST) -> Optional[str]:
+    """Return the indicator name if *node* is a known ROCm condition, else None."""
+    name = get_full_name(node)
+    if name is None:
+        return None
+    for indicator in ROCM_CONDITION_NAMES:
+        if name == indicator:
+            return indicator
+    return None
+
+
+def classify_condition_node(node: ast.AST) -> Tuple[Optional[str], Optional[str]]:
     """
-    Heuristically classify an if-condition as checking for ROCm.
+    Classify an AST condition expression for ROCm relevance by walking
+    the boolean structure.
 
     Returns (classification, indicator) where classification is one of:
-        - "positive": branch executes on ROCm
-        - "negative": branch executes when NOT on ROCm
-        - None: unable to classify
+        - "positive": condition is True on ROCm regardless of other variables
+        - "negative": condition is False on ROCm regardless of other variables
+        - None: unable to classify (compound / runtime-dependent)
+
+    Key semantics:
+        - Or(a, b):  "positive" if ANY operand is "positive"
+        - And(a, b): "positive" only if ALL operands are "positive"
+        - Not(x):    flips "positive" <-> "negative"
+        - Leaf:      "positive" if it's a ROCm indicator name, else None
+
+    This ensures that compound conditions like
+        TEST_WITH_ROCM and (not torch.cuda.has_magma)
+    return None (not sufficient), while
+        TEST_WITH_ROCM or IS_WINDOWS
+    returns "positive" (ROCm alone is sufficient).
+    """
+    indicator = _is_rocm_indicator(node)
+    if indicator is not None:
+        return "positive", indicator
+
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+        inner_cls, inner_ind = classify_condition_node(node.operand)
+        if inner_cls == "positive":
+            return "negative", inner_ind
+        if inner_cls == "negative":
+            return "positive", inner_ind
+        return None, None
+
+    if isinstance(node, ast.BoolOp):
+        results = [classify_condition_node(v) for v in node.values]
+        if isinstance(node.op, ast.Or):
+            for cls, ind in results:
+                if cls == "positive":
+                    return "positive", ind
+            for cls, ind in results:
+                if cls == "negative":
+                    return "negative", ind
+            return None, None
+        if isinstance(node.op, ast.And):
+            all_positive = all(cls == "positive" for cls, _ in results)
+            if all_positive and results:
+                return "positive", results[0][1]
+            any_negative = any(cls == "negative" for cls, _ in results)
+            if any_negative:
+                return "negative", next(ind for cls, ind in results if cls == "negative")
+            return None, None
+
+    if isinstance(node, ast.Compare):
+        left_name = get_full_name(node.left)
+        if left_name:
+            for indicator in ROCM_CONDITION_NAMES:
+                if left_name != indicator:
+                    continue
+                if len(node.ops) == 1 and len(node.comparators) == 1:
+                    op = node.ops[0]
+                    comp = node.comparators[0]
+                    if isinstance(op, (ast.Is, ast.Eq)):
+                        if is_false_constant(comp) or is_none_constant(comp):
+                            return "negative", indicator
+                        if is_true_constant(comp):
+                            return "positive", indicator
+                    elif isinstance(op, (ast.IsNot, ast.NotEq)):
+                        if is_true_constant(comp):
+                            return "negative", indicator
+                        if is_false_constant(comp):
+                            return "positive", indicator
+                return None, None
+
+    return None, None
+
+
+def classify_condition_text(text: str) -> Tuple[Optional[str], Optional[str]]:
+    """Fallback: parse a condition string and classify via AST.
+
+    Used only when the caller has text but no AST node (e.g. visit_If
+    where the condition text is already extracted).
     """
     if not text:
         return None, None
-    sanitized = re.sub(r"[^a-z0-9._]", "", text.lower())
-    for indicator in ROCM_CONDITION_NAMES:
-        simple = indicator.lower()
-        if simple not in sanitized:
-            continue
-        negative_patterns = (
-            f"not{simple}",
-            f"{simple}==false",
-            f"{simple}!=true",
-            f"{simple}isfalse",
-            f"{simple}isnone",
-            f"{simple}==none",
-            f"{simple}==0",
-            f"{simple}isnottrue",
-        )
-        if any(pattern in sanitized for pattern in negative_patterns):
-            return "negative", indicator
-        return "positive", indicator
-    return None, None
+    try:
+        tree = ast.parse(text, mode="eval")
+        return classify_condition_node(tree.body)
+    except SyntaxError:
+        return None, None
 
 
 def block_has_skip_behavior(statements: Sequence[ast.stmt]) -> bool:
@@ -218,16 +290,20 @@ def detect_decorator_categories(
         skip_on_rocm: Optional[bool] = None
 
         if normalized.startswith("unittestskip"):
+            is_skip_unless = "unless" in normalized
             condition_node = args[0] if args else None
             if condition_node is None:
                 if not contains_rocm_text(detail):
                     continue
                 skip_on_rocm = True
             else:
-                condition_text = expr_to_text(condition_node)
-                classification, _ = classify_condition_text(condition_text)
-                if classification != "positive":
-                    continue
+                classification, _ = classify_condition_node(condition_node)
+                if is_skip_unless:
+                    if classification != "negative":
+                        continue
+                else:
+                    if classification != "positive":
+                        continue
                 skip_on_rocm = True
             add_category(categories, "decorator:unittest.skip_rocm", deco, detail, skip_on_rocm=skip_on_rocm)
             continue
@@ -247,7 +323,7 @@ def detect_decorator_categories(
                     continue
                 skip_on_rocm = True
             else:
-                classification, _ = classify_condition_text(expr_to_text(condition_node))
+                classification, _ = classify_condition_node(condition_node)
                 if classification != "positive":
                     continue
                 skip_on_rocm = True
@@ -281,7 +357,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
 
     def visit_If(self, node: ast.If) -> None:
         condition_text = expr_to_text(node.test)
-        classification, indicator = classify_condition_text(condition_text)
+        classification, indicator = classify_condition_node(node.test)
 
         if classification == "positive":
             if block_has_skip_behavior(node.body):
@@ -341,8 +417,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             skip_on_rocm = True
         else:
             if args:
-                condition_text = expr_to_text(args[0])
-                classification, _ = classify_condition_text(condition_text)
+                classification, _ = classify_condition_node(args[0])
                 if classification == "positive":
                     skip_on_rocm = True
                 else:
