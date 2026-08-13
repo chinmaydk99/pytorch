@@ -492,6 +492,7 @@ class Backend(str):  # noqa: SLOT000
     UNDEFINED = "undefined"
     GLOO = "gloo"
     NCCL = "nccl"
+    RCCL = "rccl"
     UCC = "ucc"
     MPI = "mpi"
     XCCL = "xccl"
@@ -503,7 +504,7 @@ class Backend(str):  # noqa: SLOT000
 
     _plugins: dict[str, _BackendPlugin] = {}
 
-    backend_list = [UNDEFINED, GLOO, NCCL, XCCL, UCC, MPI, FAKE]
+    backend_list = [UNDEFINED, GLOO, NCCL, RCCL, XCCL, UCC, MPI, FAKE]
 
     # 3rd-party devices can register the default backend support here
     default_device_backend_map: dict[str, str] = {
@@ -516,6 +517,7 @@ class Backend(str):  # noqa: SLOT000
     backend_capability: dict[str, list[str]] = {
         GLOO: ["cpu", "cuda"],
         NCCL: ["cuda"],
+        RCCL: ["cuda"],
         XCCL: ["xpu"],
         UCC: ["cpu", "cuda"],
         MPI: ["cpu", "cuda"],
@@ -526,6 +528,7 @@ class Backend(str):  # noqa: SLOT000
         UNDEFINED: ProcessGroup.BackendType.UNDEFINED,
         GLOO: ProcessGroup.BackendType.GLOO,
         NCCL: ProcessGroup.BackendType.NCCL,
+        RCCL: ProcessGroup.BackendType.CUSTOM,
         XCCL: ProcessGroup.BackendType.XCCL,
         UCC: ProcessGroup.BackendType.UCC,
         MPI: ProcessGroup.BackendType.MPI,

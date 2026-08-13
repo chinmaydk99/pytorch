@@ -72,6 +72,7 @@ if _TORCHCOMM_AVAILABLE:
         ("gloo", "TORCHCOMM_HAS_GLOO"),
         ("xccl", "TORCHCOMM_HAS_XCCL"),
         ("nccl", "TORCHCOMM_HAS_NCCL"),
+        ("rccl", "TORCHCOMM_HAS_RCCL"),
         ("rcclx", "TORCHCOMM_HAS_RCCLX"),
         ("ncclx", "TORCHCOMM_HAS_NCCLX"),
     ]:
@@ -2245,7 +2246,7 @@ class C10dTorchCommsTestBase(MultiProcContinuousTest):
     @staticmethod
     def backend(device) -> str:
         if "cuda" in device:
-            return "nccl"
+            return "rccl" if TEST_WITH_ROCM else "nccl"
         elif "hpu" in device:
             return "hccl"
         elif "xpu" in device:
@@ -2284,7 +2285,7 @@ class C10dTorchCommsTestBase(MultiProcContinuousTest):
         super()._init_pg(rank, world_size, rdvz_file)
         # Set up accelerator device if using nccl/xccl backend
         backend = cls.backend_str()
-        if "nccl" in backend or "xccl" in backend:
+        if "nccl" in backend or "xccl" in backend or "rccl" in backend:
             accelerator = torch.accelerator.current_accelerator()
             if accelerator:
                 device = torch.device(f"{accelerator.type}:{rank}")
