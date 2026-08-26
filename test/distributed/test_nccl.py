@@ -32,7 +32,6 @@ from torch.testing._internal.common_distributed import (
     skip_if_lt_x_gpu,
 )
 from torch.testing._internal.common_utils import (
-    getRocmVersion,
     instantiate_parametrized_tests,
     IS_WINDOWS,
     load_tests,
@@ -41,6 +40,7 @@ from torch.testing._internal.common_utils import (
     requires_cuda_p2p_access,
     run_tests,
     skip_but_pass_in_sandcastle_if,
+    skipIfRocmVersionLessThan,
     TEST_WITH_ROCM,
     TestCase,
 )
@@ -253,10 +253,7 @@ class TestNCCL(TestCase):
 
 @instantiate_parametrized_tests
 @requires_cuda_p2p_access()
-@skip_but_pass_in_sandcastle_if(
-    TEST_WITH_ROCM and getRocmVersion() == (7, 14),
-    "RCCL CUMEM/P2P communicator init fails on ROCm 7.14 (p2p_tmp.cc:358)",
-)
+@skipIfRocmVersionLessThan((10, 1))
 class NCCLSymmetricMemoryTest(MultiProcContinuousTest):
     @property
     def device(self) -> torch.device:
@@ -1455,10 +1452,7 @@ class NCCLSymmetricMemoryNcclLazyTest(NCCLSymmetricMemoryNccl2Test):
 
 
 @requires_cuda_p2p_access()
-@skip_but_pass_in_sandcastle_if(
-    TEST_WITH_ROCM and getRocmVersion() == (7, 14),
-    "RCCL CUMEM/P2P communicator init fails on ROCm 7.14 (p2p_tmp.cc:358)",
-)
+@skipIfRocmVersionLessThan((10, 1))
 class NCCLSymmetricMemoryWinDisabledTest(MultiProcContinuousTest):
     """RCCL symmetric-memory precondition fail-fast.
 
@@ -1533,10 +1527,7 @@ class NCCLSymmetricMemoryWinDisabledTest(MultiProcContinuousTest):
     not TEST_WITH_ROCM,
     "ROCm-only: the free-block cache that retains peer alloc infos is USE_ROCM",
 )
-@skip_but_pass_in_sandcastle_if(
-    TEST_WITH_ROCM and getRocmVersion() == (7, 14),
-    "RCCL CUMEM/P2P communicator init fails on ROCm 7.14 (p2p_tmp.cc:358)",
-)
+@skipIfRocmVersionLessThan((10, 1))
 class NCCLSymmetricMemoryRestartTest(MultiProcContinuousTest):
     """ROCm cached allocations must not retain PAIs for dead communicators.
 
